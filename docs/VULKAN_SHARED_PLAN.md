@@ -121,6 +121,22 @@ Adreno reports them — float-controls properties and `uniformBufferStandardLayo
 storage image with an integer format from its atomic but a float sampled type from the blank state: the writer now makes every formatted
 image integer). 96 compute programs use the pool table. Library at `/mnt/Data/mkw-eden-lib/v-0035e16073bf/dmsh_vk.lib`.
 
+**The Legend of Zelda: Ocarina of Time** (`~/OoT-recomp`, a third checkout of this tree on upstream's OoT dump; seed by
+`nx2/shader_census.py`, 42,856 stages): 42,173 entries (15,809 vertex, 22,334 fragment, 4,030 compute), 718 MB, **2 unfillable
+bindings** (two fragment textures whose handle is a c1 word), 2 spirv-val failures (Eden's own: a value defined in a conditional
+block used after it, in two fragment shaders — present on Linux too, where the driver accepts it). 683 not written: 519
+task/mesh/geometry/tessellation stages (OoT's culling runs as task/mesh programs on Linux; the Android replay draws mesh
+pipelines, the writer does not emit them yet), 85 unparsed, 70 with cooperative matrices. What OoT needed beyond the other two:
+- **`DMSH_VK_KIND_TEX_HP` (23), a new record kind in the library ABI**: 8,275 fragment textures take their handle from a
+  storage-buffer load the shader addresses (bindless lights). Hookshot resolves these per draw with a small stack-machine
+  "handle program" (`Shader::HandleOp`); the writer now stores that program in the blob (record `bytes` = offset / 16) and
+  the Android replay (`vka_bind.c hp_eval`) runs it over the bound state: uniform-slot words from guest memory, the stage's c0
+  storage-buffer table (address and size of a slot) and compute's uniform-pointer table from the bound ranges, storage reads
+  from the entry's k-th storage record. `vka_shader.c` hands the walker the blob (`vka_hp_blob`).
+- 2,410 fragment textures whose "handle" word is a storage buffer's address (OoT's water: Eden's fallback when it cannot follow
+  the per-pixel handle) are written as unbound texture slots, which is what the Linux host binds there too.
+Library at `/mnt/Data/oot-eden-lib3/v-0035e16073bf/dmsh_vk.lib`.
+
 Still open before a phone plays it (in order):
 1. On the phone: `DM_VK_SHLIB=<this dmsh_vk.lib>` with `DM_VK_SHLIB_CHECK=1`, draws compared with the Ryujinx library. No
    phone is attached to this machine; the library is at `/mnt/Data/bananza-eden-lib/v4/v-0035e16073bf/dmsh_vk.lib`.
@@ -131,7 +147,9 @@ Still open before a phone plays it (in order):
    "Depth": only position-writing stages carry the constant) — parity, not a gap. Vertex inputs and colour outputs are declared float
    (`vin_types` / `fout_types` 0); the replay retypes them per draw for integer formats (`vin_u`/`vin_s`, `VKA_FS_RETYPE`), so the
    `UINT` variants of item 2 matter only to a replay without that retyping.
-4. Geometry and tessellation stages (911): Hookshot's parser does not decode them; the Android replay draws them.
+4. Geometry, tessellation, task and mesh stages: Hookshot's parser does not decode geometry/tessellation and the writer does not emit
+   task/mesh (OoT: 519 stages, its culling); the Android replay draws both. Eden translates task/mesh on Linux, so emitting them is
+   a writer change (the mesh-stage binding range and `F_MESH_PRIM`), not a translator one.
 5. Step 2 of the plan, done as `android/bananative/scripts/pack_android.py --shader-lib <dmsh_vk.lib>`: the pack takes the Eden-built
    library as it is (stamp written from its header: game id, inputs `eden-hookshot`), no translator and no .NET run. Tested on
    Bananza's v4 library (the shader step alone). `bananative_env.py` still installs .NET for the old path until the phone A/B passes.
