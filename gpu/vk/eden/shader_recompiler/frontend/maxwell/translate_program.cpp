@@ -28,6 +28,7 @@ namespace Shader::Optimization {   // (EvilOOT: collect_shader_info_pass.cpp, de
 extern thread_local u32 g_nvn2_compute_ssbo_base;
 extern thread_local u32 g_nvn2_compute_ssbo_count;
 extern thread_local u32 g_nvn2_compute_layout_end;
+extern thread_local bool g_nvn2_gmem_map;
 extern thread_local bool g_nvn2_miss_log_this;
 }
 
@@ -121,7 +122,7 @@ void AddGlobalTables(IR::Program& program) {
         });
     }
     if ((program.stage == Stage::Task || program.stage == Stage::Mesh || compute_table) && program.info.uses_global_memory &&
-        room()) {
+        room() && !Optimization::g_nvn2_gmem_map) {
         program.info.storage_buffers_descriptors.push_back({
             .cbuf_index = 0U,
             .cbuf_offset = 0x880U,

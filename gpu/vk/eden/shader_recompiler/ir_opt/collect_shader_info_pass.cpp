@@ -982,6 +982,8 @@ thread_local u32 g_nvn2_compute_ssbo_count{16};
 /// (and where that layout ends: 0 unknown. Below 0x880 the program gets the back end's pointer table there, as task and
 /// mesh programs do: translate_program.cpp AddGlobalTables, vk_bank.cpp pointer_table)
 thread_local u32 g_nvn2_compute_layout_end{0};
+/// (hookshot, the Android library: the back end's pointer table at c0+0x880 is not added, Profile::gmem_map stands in for it)
+thread_local bool g_nvn2_gmem_map{false};
 /// (RX_VK_MISS_LOG: whether the program being translated gets the miss log; vk_shader.cpp sets it per program)
 thread_local bool g_nvn2_miss_log_this{true};
 /// (RX_VK_ALL_GLOBAL_PROGS=<key prefix>[,...], a test: the program's memory accesses all left global, none bound)

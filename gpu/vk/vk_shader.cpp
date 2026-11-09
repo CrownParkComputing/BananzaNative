@@ -66,6 +66,7 @@ extern thread_local PointerDiag g_pointer_diag;
 extern thread_local uint32_t g_nvn2_compute_ssbo_base;
 extern thread_local uint32_t g_nvn2_compute_ssbo_count;
 extern thread_local uint32_t g_nvn2_compute_layout_end;
+extern thread_local bool g_nvn2_gmem_map;
 extern thread_local bool g_nvn2_miss_log_this;
 extern thread_local bool g_all_global_this;
 }
@@ -2611,6 +2612,7 @@ struct DmshEntryOut {
     int unknown = 0;   // bindings the replay cannot fill
     int push_moved = 0;         // compute: c0 push-constant reads moved to the push bank
     bool push_unmoved = false;  // compute: push reads left in c0 (computed offsets, or bank 17 in use)
+    int gmem_map = 0, gmem_log = 0;   // raw global memory through the phone's pool table (and its write log)
     std::vector<std::string> notes;   // what the report lists for this entry
 };
 // A texture or image handle's binding: from the c2 table (graphics, slot = (offset - 0x20) / 8), a uniform buffer word
@@ -2649,7 +2651,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     Shader::Backend::Bindings bindings{};
     bindings.unified = (u32)dmsh_range(ds) * DMSH_VK_STAGE_BINDINGS;
     uint32_t cs_base = 0, cs[9] = {0};   // (compute: push bytes, ubo_at, ssbo_at, tex_at, img_at, ubo, ssbo, tex, img)
-    struct Reset { ~Reset() { seed_cs_control = nullptr; Shader::Optimization::g_nvn2_compute_ssbo_base = 0, Shader::Optimization::g_nvn2_compute_ssbo_count = 16; Shader::Optimization::g_nvn2_compute_layout_end = 0; } } reset;
+    struct Reset { ~Reset() { seed_cs_control = nullptr; Shader::Optimization::g_nvn2_compute_ssbo_base = 0, Shader::Optimization::g_nvn2_compute_ssbo_count = 16; Shader::Optimization::g_nvn2_compute_layout_end = 0; Shader::Optimization::g_nvn2_gmem_map = false; } } reset;
     if (code.stage == 5) {
         seed_cs_control = seed.blob.data() + st.control;
         uint32_t count = 0, end = 0;
@@ -2660,6 +2662,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         if (!count) cs_base = 0x310;
         compute_c0_layout(*blank, cs);
     }
+    Shader::Optimization::g_nvn2_gmem_map = true;   // (no pointer table at c0+0x880: the phone's pool table instead, Profile::gmem_map)
     Env env{*blank, code, shst};
     std::unique_ptr<Translation> t;
     std::vector<uint32_t> spirv;
@@ -2681,7 +2684,9 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
             rt.previous_stage_stores.mask.set();
             for (auto& c : rt.color_output_types) c = Shader::AttributeType::Float;
         }
-        spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, t->program, bindings);
+        Shader::Profile p = profile();
+        p.gmem_map = true;
+        spirv = Shader::Backend::SPIRV::EmitSPIRV(p, rt, t->program, bindings);
     } catch (const std::exception& e) {
         return why = e.what(), false;
     }
@@ -2760,6 +2765,10 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         if (d.is_written) r->flags |= DMSH_VK_BF_RW;
         r->dim = dmsh_dim(d.type, false, false, d.is_integer);
     }
+    // raw global memory (Profile::gmem_map): the pool table, and the write log of a program that stores through it
+    if (info.uses_gmem_map) rec(DMSH_VK_KIND_GMEM_MAP, 7, 1);
+    if (info.uses_gmem_log) { dmsh_vk_bind* r = rec(DMSH_VK_KIND_GMEM_LOG, 7, 1); r->flags |= DMSH_VK_BF_RW; out.gmem_log++; }
+    if (info.uses_gmem_map) out.gmem_map++;
     e.bind_count = (uint16_t)out.binds.size();
     e.c1_len = (uint32_t)out.c1.size();
     return true;
@@ -2772,7 +2781,7 @@ bool dmsh_write_library(const char* dir) {
     struct Done { DmshEntryOut out; };
     std::map<uint64_t, Done> entries;
     std::map<std::string, int> failures;
-    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0, push_moved = 0, push_unmoved = 0;
+    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0, push_moved = 0, push_unmoved = 0, gmem_map = 0, gmem_log = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (size_t i = 0; i < seed.stages.size(); i++) {
         const SeedStage& st = seed.stages[i];
@@ -2786,6 +2795,8 @@ bool dmsh_write_library(const char* dir) {
         if (out.unknown) with_unknown++, unknown_binds += out.unknown;
         if (out.push_moved) push_moved++;
         if (out.push_unmoved) push_unmoved++;
+        if (out.gmem_map) gmem_map++;
+        if (out.gmem_log) gmem_log++;
         entries[out.e.key].out = std::move(out);
         if (tried % 500 == 0) { printf("@@progress %.3f\n", (double)i / seed.stages.size()); fflush(stdout); }
     }
@@ -2840,6 +2851,7 @@ bool dmsh_write_library(const char* dir) {
         fprintf(r, "seed stages %zu, tried %zu, written %zu (%zu with a binding the replay cannot fill: %zu such bindings), %.0f s\n", seed.stages.size(), tried, written,
                 with_unknown, unknown_binds, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         fprintf(r, "compute: %zu programs with push-constant reads moved to the push bank, %zu with such reads left in c0\n", push_moved, push_unmoved);
+        fprintf(r, "raw global memory: %zu programs read through the pool table (gmem_map), %zu of them store through it (gmem_log)\n", gmem_map, gmem_log);
         for (const auto& [why, n] : failures) fprintf(r, "  %6d  %s\n", n, why.c_str());
         std::map<std::string, int> notes;
         for (const auto& [key, d] : entries) for (const std::string& n : d.out.notes) notes[n]++;

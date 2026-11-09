@@ -587,7 +587,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
-    DefineGlobalMemoryFunctions(program.info);
+    DefineGlobalMemoryFunctions(program.info, image_binding);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
 }
@@ -1067,10 +1067,98 @@ constexpr unsigned long long kGuestPagesBytes = 8ull << 30;
 constexpr unsigned long long kGuestPagesBase2 = 0x7f00000000ull;
 constexpr unsigned long long kGuestPagesBytes2 = 4ull << 30;
 
-void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
+void EmitContext::DefineGlobalMemoryFunctions(Info& info, u32& binding) {
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
+    // (hookshot, Profile::gmem_map: the Android library. BananaNative's replay fills a pool table (dmsh_abi.h DMSH_GMEM_MAP_*: 8192
+    // entries of start, end, delta = device address - guest address, hint; entry 0 empty with the sink's address in its last words)
+    // and a write log (bit i of word i / 32 for table entry i). An access no bound buffer holds goes through it: the chunk hint
+    // (word 6 of entry (address >> 21) & 8191, tagged chunk << 13 | entry) or a bisection of the starts, then the address plus the
+    // entry's delta through a physical storage buffer pointer; an address in no pool goes to the sink. No branch: the sink takes
+    // the misses. Declared here as the stage's last two storage buffers, after the images; vk_shader.cpp records them)
+    const bool gmem{profile.gmem_map && (stage == Stage::Compute || stage == Stage::VertexB || stage == Stage::Fragment) &&
+                    !info.uses_render_area};
+    Id gmem_u32x2_ptr{}, gmem_u32_ptr{};
+    if (gmem) {
+        AddExtension("SPV_KHR_storage_buffer_storage_class");
+        AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+        AddExtension("SPV_KHR_physical_storage_buffer");
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        // (the block types of the stage's own storage buffers where it has them: Sirit folds equal types into one id, and a
+        // second ArrayStride or Block on it is invalid)
+        const auto declare{[&](StorageTypeDefinition& def, Id type, u32 stride, const char* name) {
+            if (!Sirit::ValidId(def.array)) {
+                const Id array{TypeRuntimeArray(type)};
+                Decorate(array, spv::Decoration::ArrayStride, stride);
+                const Id block{TypeStruct(array)};
+                Decorate(block, spv::Decoration::Block);
+                MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+                def.array = TypePointer(spv::StorageClass::StorageBuffer, block);
+                def.element = TypePointer(spv::StorageClass::StorageBuffer, type);
+            }
+            const Id id{AddGlobalVariable(def.array, spv::StorageClass::StorageBuffer)};
+            Decorate(id, spv::Decoration::Binding, binding++);
+            Decorate(id, spv::Decoration::DescriptorSet, 0U);
+            Name(id, name);
+            if (profile.supported_spirv >= 0x00010400) interfaces.push_back(id);
+            return id;
+        }};
+        gmem_map_var = declare(storage_types.U32x2, U32[2], 8U, "gmem_map");
+        gmem_u32x2_ptr = storage_types.U32x2.element;
+        info.uses_gmem_map = true;
+        if (info.stores_global_memory) {
+            gmem_log_var = declare(storage_types.U32, U32[1], 4U, "gmem_log");
+            gmem_u32_ptr = storage_types.U32.element;
+            info.uses_gmem_log = true;
+        }
+    }
+    // gmem_find(address) -> (device address, table entry): the entry 0 and the sink for an address in no pool
+    Id gmem_find{};
+    const Id U64x2{gmem ? TypeVector(U64, 2) : Id{}};
+    if (gmem) {
+        const Id function_type{TypeFunction(U64x2, U64)};
+        gmem_find = OpFunction(U64x2, spv::FunctionControlMask::DontInline, function_type);
+        const Id addr{OpFunctionParameter(U64)};
+        AddLabel();
+        const Id zero{u32_zero_value};
+        const auto word2{[&](Id entry, u32 k) {   // (the k-th u32x2 of entry: 0 start, 1 end, 2 delta, 3 hint and padding)
+            const Id index{OpIAdd(U32[1], OpShiftLeftLogical(U32[1], entry, Const(2U)), Const(k))};
+            return OpLoad(U32[2], OpAccessChain(gmem_u32x2_ptr, gmem_map_var, zero, index));
+        }};
+        const auto u64_of{[&](Id v2) { return OpBitcast(U64, v2); }};
+        const Id mask{Const(8191U)};
+        const Id chunk{OpUConvert(U32[1], OpShiftRightLogical(U64, addr, Const(21U)))};   // (chunks below 2^19 carry a hint: the tag's room)
+        const Id chunk_ok{OpULessThan(U1, chunk, Const(1U << 19))};
+        const Id hint{OpCompositeExtract(U32[1], word2(OpBitwiseAnd(U32[1], chunk, mask), 3U), 0U)};
+        const Id hinted{OpBitwiseAnd(U32[1], hint, mask)};
+        const Id hint_ok{OpLogicalAnd(U1, OpLogicalAnd(U1, chunk_ok, OpINotEqual(U1, hinted, zero)),
+                                      OpIEqual(U1, OpShiftRightLogical(U32[1], hint, Const(13U)), chunk))};
+        // (the bisection, branchless: the last entry whose start is at or below the address; unused entries start at ~0)
+        Id found{zero};
+        for (u32 step = 4096; step; step >>= 1) {
+            const Id cand{OpIAdd(U32[1], found, Const(step))};
+            const Id start{u64_of(word2(cand, 0U))};
+            found = OpSelect(U32[1], OpULessThanEqual(U1, start, addr), cand, found);
+        }
+        const Id entry{OpSelect(U32[1], hint_ok, hinted, found)};
+        const Id start{u64_of(word2(entry, 0U))};
+        const Id end{u64_of(word2(entry, 1U))};
+        const Id delta{u64_of(word2(entry, 2U))};
+        const Id inside{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, start), OpULessThan(U1, addr, end))};
+        const Id sink{u64_of(word2(zero, 3U))};
+        const Id target{OpSelect(U64, inside, OpIAdd(U64, addr, delta), sink)};
+        const Id which{OpSelect(U32[1], inside, entry, zero)};
+        OpReturnValue(OpCompositeConstruct(U64x2, target, OpUConvert(U64, which)));
+        OpFunctionEnd();
+    }
+    const auto gmem_logged{[&](Id entry_u64) {   // (a store or atomic through table entry e: bit e of the log, entry 0's harmless)
+        if (!Sirit::ValidId(gmem_log_var)) return;
+        const Id e{OpUConvert(U32[1], entry_u64)};
+        const Id word{OpAccessChain(gmem_u32_ptr, gmem_log_var, u32_zero_value, OpShiftRightLogical(U32[1], e, Const(5U)))};
+        const Id bit{OpShiftLeftLogical(U32[1], Const(1U), OpBitwiseAnd(U32[1], e, Const(31U)))};
+        OpAtomicOr(U32[1], word, Const(static_cast<u32>(spv::Scope::Device)), u32_zero_value, bit);
+    }};
     // (hookshot) A pointer that is in no bound buffer. Eden gave such a load 0, and the game's foliage culling follows pointers read from its
     // storage buffers to all of a forest's data: it read zeros, and left out every tree, fern and blade of grass. The console's GPU just reads
     // memory: here a page table (vk_memory.cpp) takes the guest address to its pool's device address.
@@ -1089,7 +1177,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     const bool follow_pointers{(stage == Stage::Compute || (!no_mesh && (stage == Stage::Task || stage == Stage::Mesh)) ||
                                 (graphics && graphics_stage && !info.uses_render_area)) && !no_follow};
     Id ptr_u64{};
-    if (follow_pointers) {
+    if (follow_pointers && !gmem) {
         wants_guest_pages = true;
         if (profile.unified_descriptor_binding && rescaling_push_constants.value == 0) DefineRescalingInputPushConstant();   // (the table's address is in it)
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
@@ -1131,7 +1219,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     // by one, the next page may be another allocation's or none, and a 16-byte read at a page's end faulted the device (the culling
     // passes 53caac5f, b6122162 at a save's load)
     const auto guest_lookup = [&](Id addr, u32 size, auto&& hit) {
-        if (!follow_pointers || gp_level < 2) return;
+        if (!follow_pointers || gp_level < 2 || gmem) return;
         const Id table{wants_guest_pages && rescaling_push_constants.value != 0
                            ? OpLoad(U64, OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U64), rescaling_push_constants,
                                                        Const(guest_pages_member_index)))
@@ -1354,7 +1442,12 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             if (gp_level >= 3) OpReturnValue(psb_load(type, target, 4U));
             else OpReturnValue(ConstantNull(type));
         });
-        OpReturnValue(ConstantNull(type));
+        if (gmem) {   // (the pool table: the sink answers a miss)
+            const Id found{OpFunctionCall(U64x2, gmem_find, addr)};
+            OpReturnValue(psb_load(type, OpCompositeExtract(U64, found, 0U), 4U));
+        } else {
+            OpReturnValue(ConstantNull(type));
+        }
         OpFunctionEnd();
         return func_id;
     }};
@@ -1371,6 +1464,11 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             if (gp_level >= 3) OpStore(psb_member(type, target), data, spv::MemoryAccessMask::Aligned, 4U);
             OpReturn();
         });
+        if (gmem) {
+            const Id found{OpFunctionCall(U64x2, gmem_find, addr)};
+            OpStore(psb_member(type, OpCompositeExtract(U64, found, 0U)), data, spv::MemoryAccessMask::Aligned, 4U);
+            gmem_logged(OpCompositeExtract(U64, found, 1U));
+        }
         OpReturn();
         OpFunctionEnd();
         return func_id;
@@ -1410,7 +1508,14 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
                 if (gp_level >= 3) OpReturnValue((this->*atomics[i])(U32[1], psb_member(U32[1], target), scope, u32_zero_value, value));
                 else OpReturnValue(u32_zero_value);
             });
-            OpReturnValue(u32_zero_value);
+            if (gmem) {
+                const Id found{OpFunctionCall(U64x2, gmem_find, addr)};
+                const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+                gmem_logged(OpCompositeExtract(U64, found, 1U));
+                OpReturnValue((this->*atomics[i])(U32[1], psb_member(U32[1], OpCompositeExtract(U64, found, 0U)), scope, u32_zero_value, value));
+            } else {
+                OpReturnValue(u32_zero_value);
+            }
             OpFunctionEnd();
             atomic_global_func_u32[i] = func_id;
         }
@@ -1430,7 +1535,13 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             if (gp_level >= 3) OpReturnValue(cas(psb_member(U32[1], target)));
             else OpReturnValue(u32_zero_value);
         });
-        OpReturnValue(u32_zero_value);
+        if (gmem) {
+            const Id found{OpFunctionCall(U64x2, gmem_find, addr)};
+            gmem_logged(OpCompositeExtract(U64, found, 1U));
+            OpReturnValue(cas(psb_member(U32[1], OpCompositeExtract(U64, found, 0U))));
+        } else {
+            OpReturnValue(u32_zero_value);
+        }
         OpFunctionEnd();
         atomic_global_cas_func_u32 = func_id;
     }

@@ -306,6 +306,8 @@ public:
     u32 rescaling_downfactor_member_index{};
     u32 guest_pages_member_index{};   // (hookshot: GUEST_PAGES_PUSH_OFFSET's member, compute only)
     bool wants_guest_pages{};
+    Id gmem_map_var{};   // (hookshot, Profile::gmem_map: BananaNative's pool table and write log, u32x2 / u32 storage buffers)
+    Id gmem_log_var{};
     Id probe_log{};   // (EvilOOT, RX_VK_BLOCK_PROBE: the miss log's U32 storage buffer, per-block entry counters at word 128+)
     u32 mesh_first_member_index{};    // (hookshot: MESH_FIRST_PUSH_OFFSET's member, task programs)
     bool wants_mesh_first{};
@@ -458,7 +460,7 @@ private:
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
-    void DefineGlobalMemoryFunctions(const Info& info);
+    void DefineGlobalMemoryFunctions(Info& info, u32& binding);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();

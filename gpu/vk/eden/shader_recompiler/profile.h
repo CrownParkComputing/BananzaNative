@@ -67,6 +67,11 @@ struct Profile {
     bool support_storage_texel_buffer_array_nonuniform_indexing{};
 
     bool warp_size_potentially_larger_than_guest{};
+    /// (hookshot, the Android library: raw global memory that no bound buffer holds goes through BananaNative's pool table
+    /// (dmsh_abi.h DMSH_GMEM_MAP_*: a storage buffer the replay fills, searched by hint then bisection, the access through a
+    /// physical storage buffer pointer at address + the pool's delta; stores also set their entry's bit in the write log)
+    /// instead of the host's page table in the push block
+    bool gmem_map{};
 
     bool lower_left_origin_mode{};
     /// Fragment outputs have to be declared even if they are not written to avoid undefined values.

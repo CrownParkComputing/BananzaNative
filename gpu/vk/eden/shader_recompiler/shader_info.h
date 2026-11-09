@@ -355,6 +355,8 @@ struct Info {
     bool uses_atomic_s32_max{};
     bool uses_int64_bit_atomics{};
     bool uses_global_memory{};
+    bool uses_gmem_map{};   // (hookshot, Profile::gmem_map: the back end declared the pool table (and the write log) as the last storage buffers)
+    bool uses_gmem_log{};
     bool uses_atomic_image_u32{};
     bool uses_shadow_lod{};
     bool uses_rescaling_uniform{};
