@@ -25,5 +25,8 @@ jobs:
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |
           T="Upstream Hookshot has new commits"
-          N=$(gh issue list --state open --search "\"$T\" in:title" --json number --jq '.[0].number')
-          if [ -n "$N" ]; then gh issue edit "$N" --body-file body.md; else gh issue create --title "$T" --body-file body.md; fi
+          # (REST, not GraphQL: the workflow token's createIssue mutation is refused as "not accessible by integration")
+          R=${{ github.repository }}
+          N=$(gh api "repos/$R/issues?state=open&per_page=50" --jq ".[] | select(.title == \"$T\") | .number" | head -1)
+          if [ -n "$N" ]; then gh api -X PATCH "repos/$R/issues/$N" -F body=@body.md > /dev/null
+          else gh api -X POST "repos/$R/issues" -f title="$T" -F body=@body.md > /dev/null; fi
