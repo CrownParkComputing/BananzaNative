@@ -79,6 +79,11 @@
 #define DMSH_VK_KIND_SAMP_POOL 19        // samp_pool: set 1 binding 1
 #define DMSH_VK_KIND_GMEM_MAP 20         // gmem_map: the pool table for raw global memory (DMSH_GMEM_MAP_*; delta = buffer device address - guest address), STORAGE_BUFFER
 #define DMSH_VK_KIND_GMEM_LOG 21         // gmem_log: the write log of those stores, STORAGE_BUFFER, cleared per draw or dispatch
+#define DMSH_VK_KIND_TEX_HP 23           // tex_hp (BananzaNative, Eden-built libraries): a combined image sampler whose handle the replay computes per draw by running the record's
+                                         // handle program (Hookshot's Shader::HandleOp bytecode: a stack machine over uniform-slot words and storage-buffer words, the texture
+                                         // handle read from memory the shader addressed; OoT's bindless lights and water). bytes = the program's offset in the blob / 16: u32 word
+                                         // count, then the words. Texture ID in the low 20 bits, sampler ID in the high 12 (pool bases added as for tex_ubo). Storage reads name the
+                                         // k-th storage record of the entry (sbuf / sbuf_ubo / ubo_ptr in record order); constant reads name uniform slots (index 3..18)
 #define DMSH_VK_KIND_SHARED_SPILL 22     // shared_spill: a compute program's shared memory past DMSH_VK_SHARED_MAX, STORAGE_BUFFER, the record's bytes per workgroup slice. Workgroup w
                                          // (linear index (z * groups y + y) * groups x + x) uses slice w mod (the bound range / bytes); slices not cleared (shared memory starts undefined)
 #define DMSH_VK_KIND_UNKNOWN 255         // ?: not placed; the replay refuses the shader

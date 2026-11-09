@@ -132,6 +132,7 @@ static int lib_load(void) {
     snprintf(g_lib_path, sizeof g_lib_path, "%s", path);
     // The translator's answers in the header against this device: modules built for 64-lane subgroups split ballots and shuffles into 32-lane halves, so they are right on
     // 32 or 64 lanes; storage buffers are bound rounded down to ssbo_align, which the device's alignment must divide (android/SHADERS.md "Translator answers")
+    vka_hp_blob = g_lib.blob;   // (DMSH_VK_KIND_TEX_HP handle programs live in the blob)
     unsigned sg = g_lib.h->subgroup_size ? g_lib.h->subgroup_size : 32, sa = g_lib.h->ssbo_align;
     sg_plan(sg); shuffle_plan();
     if (sa && (sa % V.sb_align)) { VRED("shader library %s refused: built for storage buffers at %u-byte boundaries, the device needs %llu; nothing is drawn", path, sa, (unsigned long long)V.sb_align); vka_shlib_close(&g_lib); return 0; }

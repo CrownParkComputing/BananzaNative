@@ -2614,17 +2614,31 @@ struct DmshEntryOut {
     int push_moved = 0;         // compute: c0 push-constant reads moved to the push bank
     bool push_unmoved = false;  // compute: push reads left in c0 (computed offsets, or bank 17 in use)
     int gmem_map = 0, gmem_log = 0;   // raw global memory through the phone's pool table (and its write log)
+    std::vector<std::vector<uint32_t>> hps;             // handle programs (TEX_HP records), written into the blob
+    std::vector<std::pair<size_t, size_t>> hp_binds;    // (index into binds, index into hps)
     std::vector<std::string> notes;   // what the report lists for this entry
 };
 // A texture or image handle's binding: from the c2 table (graphics, slot = (offset - 0x20) / 8), a uniform buffer word
 // (tex_ubo), or nothing this format names (compute's per-shader c0 layout, handle programs): unknown
 void dmsh_handle_bind(dmsh_vk_bind& b, int nvn_stage, uint32_t cbuf_index, uint32_t cbuf_offset, uint32_t handle_program, uint8_t kind, uint8_t ubo_kind,
-                      int* unknown, const uint32_t cs[9]) {
+                      int* unknown, const uint32_t cs[9], std::vector<std::string>* notes = nullptr) {
+    const int before = *unknown;
+    struct Note { dmsh_vk_bind& b; int nvn_stage; uint32_t ci, co, hp; uint8_t kind; int* unknown; int before; const uint32_t* cs; std::vector<std::string>* notes;
+        ~Note() { if (*unknown == before || !notes) return; char l[200];
+            snprintf(l, sizeof l, "unknown %s: stage %d cbuf %u offset %#x%s (c0 tex table %#x x%u, img table %#x x%u)", kind == DMSH_VK_KIND_IMG ? "img" : kind == DMSH_VK_KIND_TBUF ? "tbuf" : "tex",
+                     nvn_stage, ci, co, hp != ~0u ? " handle program" : "", cs[3], cs[7], cs[4], cs[8]); notes->push_back(l); } } note{b, nvn_stage, cbuf_index, cbuf_offset, handle_program, kind, unknown, before, cs, notes};
     b.kind = kind;
     b.reg = -1;
     b.off = 0;
     const bool image = kind == DMSH_VK_KIND_IMG;
     if (handle_program != ~0u) { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; return; }
+    // (a "handle" word that is a storage buffer's address in the stage's c0 table is not a handle: Eden's fallback for a handle loaded per
+    // pixel whose path it could not follow (OoT's water lights, vk_draw.cpp handle_is_storage_pointer). The host binds no texture there; so
+    // does the record: a texture slot with nothing in it, not an unfillable binding that would refuse the draw)
+    if (!image && cbuf_index == 0 && nvn_stage != 5) {
+        const uint32_t sb = dmsh_ssbo_base(nvn_stage);
+        if (sb && cbuf_offset >= sb && cbuf_offset < sb + 256u) { b.flags |= DMSH_VK_BF_NOSLOT; if (notes) notes->push_back("texture whose handle word is a storage buffer address: bound to nothing, as on Linux"); return; }
+    }
     if (nvn_stage == 5 && cbuf_index == 0) {   // (NVN2 compute: the handles in the program's own c0 layout, by slot)
         const uint32_t at = image ? cs[4] : cs[3], n = image ? cs[8] : cs[7];
         if (cbuf_offset >= at && cbuf_offset < at + 8 * n && !((cbuf_offset - at) & 7)) b.reg = (int16_t)((cbuf_offset - at) / 8);
@@ -2732,7 +2746,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         else if (code.stage == 5 && d.index == kDmshPushAlias && out.push_moved) r->kind = DMSH_VK_KIND_DRVCB, r->reg = DMSH_PUSH_BANK;
         else if (d.index == 0 || d.index == 2) r->kind = DMSH_VK_KIND_DRVCB, r->reg = (int16_t)d.index;
         else if (d.index >= 3 && d.index < 19) r->reg = (int16_t)(d.index - 3);
-        else r->kind = DMSH_VK_KIND_UNKNOWN, out.unknown++;
+        else { r->kind = DMSH_VK_KIND_UNKNOWN, out.unknown++; char l[96]; snprintf(l, sizeof l, "unknown cbuf: stage %d index %u", code.stage, d.index); out.notes.push_back(l); }
     }
     for (const auto& d : info.storage_buffers_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_SBUF, 7 /* STORAGE_BUFFER */, 1);
@@ -2753,25 +2767,62 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     }
     for (const auto& d : info.texture_buffer_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_TBUF, 4 /* UNIFORM_TEXEL_BUFFER */, 1);
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TBUF, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TBUF, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs, &out.notes);
         r->dim = 5;
     }
     for (const auto& d : info.image_buffer_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 5 /* STORAGE_TEXEL_BUFFER */, 1);
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs, &out.notes);
         if (d.is_written) r->flags |= DMSH_VK_BF_RW;
         r->dim = 5 | (d.is_integer ? DMSH_VK_DIM_UINT : 0);
     }
     for (const auto& d : info.texture_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_TEX, 1 /* COMBINED_IMAGE_SAMPLER */, (uint16_t)std::max(1u, d.count));
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, ~0u, DMSH_VK_KIND_TEX, DMSH_VK_KIND_TEX_UBO, &out.unknown, cs);
+        if (d.handle_program != ~0u && d.handle_program < info.handle_programs.size() && d.count <= 1) {
+            // (the handle computed per draw: Hookshot's handle program goes into the library, the replay runs it: DMSH_VK_KIND_TEX_HP.
+            // Its constant reads must be uniform slots and its storage reads the program's own storage buffers; else the record is unfillable)
+            const auto& hp = info.handle_programs[d.handle_program];
+            bool ok = true;
+            std::string ops;
+            for (size_t pc = 0; pc < hp.size();) {
+                const auto op = static_cast<Shader::HandleOp>(hp[pc++]);
+                auto operand = [&]() -> uint32_t { return pc < hp.size() ? hp[pc++] : 0; };
+                if (op == Shader::HandleOp::Immediate) operand(), ops += " imm";
+                else if (op == Shader::HandleOp::Cbuf || op == Shader::HandleOp::CbufDynamic) {
+                    const uint32_t index = operand();
+                    const uint32_t off = op == Shader::HandleOp::Cbuf ? operand() : ~0u;
+                    char t[32];
+                    if (off != ~0u) snprintf(t, sizeof t, " c%u@%#x", index, off); else snprintf(t, sizeof t, " c%u@dyn", index);
+                    ops += t;
+                    // (c0 words the replay can answer: the stage's storage buffer table (address and size of a slot), and compute's uniform pointer table)
+                    const uint32_t sb = code.stage == 5 ? 0x310u : dmsh_ssbo_base(code.stage);
+                    const bool c0_ok = index == 0 && off != ~0u && ((sb && off >= sb && off < sb + 256u) || (code.stage == 5 && off >= 0x210u && off < 0x310u));
+                    if (!(index >= 3 && index < 19) && !c0_ok) ok = false;
+                } else if (op == Shader::HandleOp::Storage) {
+                    const uint32_t binding = operand();
+                    ops += " ssbo";
+                    if (binding >= info.storage_buffers_descriptors.size()) ok = false;
+                } else if (op == Shader::HandleOp::Tee || op == Shader::HandleOp::Load) operand(), ops += op == Shader::HandleOp::Tee ? " tee" : " load";
+                else { char t[16]; snprintf(t, sizeof t, " op%u", (unsigned)op); ops += t; }
+            }
+            if (ok) {
+                r->kind = DMSH_VK_KIND_TEX_HP, r->reg = -1, r->off = 0;
+                out.hp_binds.push_back({out.binds.size() - 1, out.hps.size()});
+                out.hps.push_back(hp);
+                out.notes.push_back("handle program:" + ops);
+                r->dim = dmsh_dim(d.type, d.is_depth, d.is_multisample, d.is_integer);
+                continue;
+            }
+            out.notes.push_back("handle program the replay cannot run:" + ops);
+        }
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TEX, DMSH_VK_KIND_TEX_UBO, &out.unknown, cs, &out.notes);
         if (r->kind == DMSH_VK_KIND_TEX) r->skind = DMSH_VK_KIND_SAMP_TEX, r->sreg = r->reg;
         else if (r->kind == DMSH_VK_KIND_TEX_UBO) r->skind = DMSH_VK_KIND_SAMP_UBO, r->sreg = r->reg, r->soff = r->off;
         r->dim = dmsh_dim(d.type, d.is_depth, d.is_multisample, d.is_integer);
     }
     for (const auto& d : info.image_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 3 /* STORAGE_IMAGE */, (uint16_t)std::max(1u, d.count));
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs, &out.notes);
         if (d.is_written) r->flags |= DMSH_VK_BF_RW;
         r->dim = dmsh_dim(d.type, false, false, d.is_integer);
     }
@@ -2792,7 +2843,7 @@ bool dmsh_write_library(const char* dir) {
     struct Done { DmshEntryOut out; };
     std::map<uint64_t, Done> entries;
     std::map<std::string, int> failures;
-    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0, push_moved = 0, push_unmoved = 0, gmem_map = 0, gmem_log = 0;
+    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0, push_moved = 0, push_unmoved = 0, gmem_map = 0, gmem_log = 0, hp_count = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (size_t i = 0; i < seed.stages.size(); i++) {
         const SeedStage& st = seed.stages[i];
@@ -2827,6 +2878,13 @@ bool dmsh_write_library(const char* dir) {
         if (!d.out.c1.empty()) { const uint64_t o = put(d.out.c1.data(), d.out.c1.size()); e.c1_off = (uint32_t)o, e.c1_off_hi = (uint32_t)(o >> 32); }
         e.bind = (uint32_t)binds.size();
         binds.insert(binds.end(), d.out.binds.begin(), d.out.binds.end());
+        for (const auto& [bi, hi] : d.out.hp_binds) {   // (TEX_HP: the program into the blob, u32 count then the words; the record's bytes = offset / 16)
+            const auto& code = d.out.hps[hi];
+            std::vector<uint32_t> w{(uint32_t)code.size()};
+            w.insert(w.end(), code.begin(), code.end());
+            binds[e.bind + bi].bytes = (uint32_t)(put(w.data(), w.size() * 4) / 16);
+            hp_count++;
+        }
         e.mod = (uint32_t)mods.size();
         dmsh_vk_module m{};
         // (one zstd frame per module, about a fifth of the size; RX_VK_DMSH_RAW=1 keeps the words as they are)
@@ -2873,6 +2931,7 @@ bool dmsh_write_library(const char* dir) {
                 with_unknown, unknown_binds, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         fprintf(r, "compute: %zu programs with push-constant reads moved to the push bank, %zu with such reads left in c0\n", push_moved, push_unmoved);
         fprintf(r, "raw global memory: %zu programs read through the pool table (gmem_map), %zu of them store through it (gmem_log)\n", gmem_map, gmem_log);
+        fprintf(r, "textures with a handle computed per draw (tex_hp, the replay runs the handle program): %zu\n", hp_count);
         for (const auto& [why, n] : failures) fprintf(r, "  %6d  %s\n", n, why.c_str());
         std::map<std::string, int> notes;
         for (const auto& [key, d] : entries) for (const std::string& n : d.out.notes) notes[n]++;

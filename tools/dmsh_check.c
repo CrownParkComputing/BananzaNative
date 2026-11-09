@@ -11,7 +11,7 @@
 
 static const char *kind_name(int k) {
     static const char *n[] = {"?", "cbuf", "c1", "drvcb", "support", "sbuf", "sbuf_ubo", "ubo_ptr", "tex", "tbuf", "img", "samp", "samp_tex", "samp_id",
-                              "tex_ubo", "samp_ubo", "tex_c2a", "samp_c2a", "tex_pool", "samp_pool", "gmem_map", "gmem_log", "shared_spill"};
+                              "tex_ubo", "samp_ubo", "tex_c2a", "samp_c2a", "tex_pool", "samp_pool", "gmem_map", "gmem_log", "shared_spill", "tex_hp"};
     return k == 255 ? "UNKNOWN" : k >= 0 && k < (int)(sizeof n / sizeof *n) ? n[k] : "?";
 }
 

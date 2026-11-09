@@ -51,6 +51,8 @@ typedef struct {
 
 // Reads guest memory for handles kept in uniform buffers (TEX_UBO, SAMP_UBO, SBUF_UBO): 1 = read, 0 = not readable (the value reads as 0)
 typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);
+// The loaded library's blob (vka_shlib.blob), where DMSH_VK_KIND_TEX_HP records keep their handle programs; NULL (the tests): such a record is refused
+extern const uint8_t *vka_hp_blob;
 
 #define VKA_WALK_REFUSE (-1)
 // Walks one stage's binding records (e->bind_count of them from b) for NVN stage nvn_stage. Writes at most max results to out and returns their count, or VKA_WALK_REFUSE with

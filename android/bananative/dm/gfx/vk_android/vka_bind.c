@@ -23,6 +23,71 @@ static uint64_t ubo_word(const vka_bstate *s, int st, int reg, unsigned off, uns
     if (!rd(ctx, s->ubo[st][reg].addr + off, &v, n)) return 0;
     return v;
 }
+const uint8_t *vka_hp_blob;
+// A DMSH_VK_KIND_TEX_HP record's handle: its program (Hookshot's HandleOp bytecode, shader_info.h EvaluateHandleProgram) run over this draw's state. Constant reads of
+// uniform slots (index 3..18) come from guest memory; storage reads from the k-th storage record's buffer. Anything else reads 0. Returns the handle word, 0 for none
+static uint64_t hp_sbuf_addr(const vka_bstate *s, int st, const dmsh_vk_bind *bs, unsigned nb, unsigned k, vka_read_fn rd, void *ctx) {
+    for (unsigned i = 0; i < nb; i++) {
+        const dmsh_vk_bind *b = &bs[i];
+        if (b->kind != DMSH_VK_KIND_SBUF && b->kind != DMSH_VK_KIND_UBO_PTR && b->kind != DMSH_VK_KIND_SBUF_UBO) continue;
+        if (k--) continue;
+        int noslot = (b->flags & DMSH_VK_BF_NOSLOT) || b->reg < 0 || b->reg >= 16;
+        if (noslot) return 0;
+        if (b->kind == DMSH_VK_KIND_SBUF) return s->ssbo[st][b->reg].addr;
+        if (b->kind == DMSH_VK_KIND_UBO_PTR) return s->ubo[st][b->reg].addr;
+        return ubo_word(s, st, b->reg, b->off, 8, rd, ctx);
+    }
+    return 0;
+}
+static uint32_t hp_eval(const vka_bstate *s, int st, const dmsh_vk_bind *bs, unsigned nb, const uint32_t *code, uint32_t n, vka_read_fn rd, void *ctx) {
+    enum { IMM, CBUF, CBUFDYN, STORAGE, ADD, SUB, MUL, AND, OR, XOR, SHL, SHR, SAR, NEG, NOT, UMIN, UMAX, SMIN, SMAX, SLT, SLE, SGT, SGE, ULT, ULE, UGT, UGE, EQ, NE, LAND, LOR, LXOR, LNOT, SELECT, TEE, LOAD };
+    uint32_t stack[64], slots[256]; unsigned size = 0; memset(slots, 0, sizeof slots);
+#define POP() (size ? stack[--size] : 0u)
+#define PUSH(v) do { if (size < 64) stack[size++] = (v); } while (0)
+    for (uint32_t pc = 0; pc < n;) {
+        uint32_t op = code[pc++];
+#define OPERAND() (pc < n ? code[pc++] : 0u)
+        if (op == IMM) { PUSH(OPERAND()); continue; }
+        if (op == CBUF || op == CBUFDYN) {
+            uint32_t index = OPERAND(), off = op == CBUF ? OPERAND() : POP(), v = 0;
+            if (index >= 3 && index < 19) v = (uint32_t)ubo_word(s, st, (int)index - 3, off, 4, rd, ctx);
+            else if (index == 0) {   // c0: the stage's storage buffer table (address lo, hi, size at 0, 4, 8 of a 16-byte row), compute's uniform pointer table too
+                static const uint32_t tab[VKA_NSTAGE] = {DMSH_C0_SSBO_VS, DMSH_C0_SSBO_PS, DMSH_C0_SSBO_GS, 0, 0, DMSH_C0_SSBO_CS, DMSH_C0_SSBO_TS, DMSH_C0_SSBO_MS};
+                const vka_range *rg = NULL;
+                if (tab[st] && off >= tab[st] && off < tab[st] + 16u * 16u) rg = &s->ssbo[st][(off - tab[st]) / 16u];
+                else if (st == 5 && off >= DMSH_C0_CS_UBO && off < DMSH_C0_CS_UBO + 16u * 16u) rg = &s->ubo[st][(off - DMSH_C0_CS_UBO) / 16u];
+                if (rg) { unsigned w = off & 15u; v = w == 0 ? (uint32_t)rg->addr : w == 4 ? (uint32_t)(rg->addr >> 32) : w == 8 ? (uint32_t)rg->size : 0u; }
+            }
+            PUSH(v); continue;
+        }
+        if (op == STORAGE) {
+            uint32_t binding = OPERAND(), off = POP(); uint64_t base = hp_sbuf_addr(s, st, bs, nb, binding, rd, ctx), v = 0;
+            PUSH(base && rd && rd(ctx, base + off, &v, 4) ? (uint32_t)v : 0u); continue;
+        }
+        if (op == NEG || op == NOT || op == LNOT) { uint32_t a = POP(); PUSH(op == NEG ? 0u - a : op == NOT ? ~a : (a == 0)); continue; }
+        if (op == TEE) { uint32_t slot = OPERAND(); if (slot < 256 && size) slots[slot] = stack[size - 1]; continue; }
+        if (op == LOAD) { uint32_t slot = OPERAND(); PUSH(slot < 256 ? slots[slot] : 0u); continue; }
+        if (op == SELECT) { uint32_t f = POP(), t = POP(), c = POP(); PUSH(c ? t : f); continue; }
+        uint32_t b = POP(), a = POP(); int32_t sa = (int32_t)a, sb = (int32_t)b, r;
+        switch (op) {
+        case ADD: PUSH(a + b); break; case SUB: PUSH(a - b); break; case MUL: PUSH(a * b); break;
+        case AND: PUSH(a & b); break; case OR: PUSH(a | b); break; case XOR: PUSH(a ^ b); break;
+        case SHL: PUSH(b >= 32 ? 0u : a << b); break; case SHR: PUSH(b >= 32 ? 0u : a >> b); break;
+        case SAR: r = sa >> (b >= 32 ? 31 : b); PUSH((uint32_t)r); break;
+        case UMIN: PUSH(a < b ? a : b); break; case UMAX: PUSH(a > b ? a : b); break;
+        case SMIN: PUSH((uint32_t)(sa < sb ? sa : sb)); break; case SMAX: PUSH((uint32_t)(sa > sb ? sa : sb)); break;
+        case SLT: PUSH(sa < sb); break; case SLE: PUSH(sa <= sb); break; case SGT: PUSH(sa > sb); break; case SGE: PUSH(sa >= sb); break;
+        case ULT: PUSH(a < b); break; case ULE: PUSH(a <= b); break; case UGT: PUSH(a > b); break; case UGE: PUSH(a >= b); break;
+        case EQ: PUSH(a == b); break; case NE: PUSH(a != b); break;
+        case LAND: PUSH(a && b); break; case LOR: PUSH(a || b); break; case LXOR: PUSH((a != 0) != (b != 0)); break;
+        default: return 0;
+        }
+#undef OPERAND
+    }
+    return size ? stack[size - 1] : 0;
+#undef POP
+#undef PUSH
+}
 static int ubo_tex_id(const vka_bstate *s, uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + s->tex_base : 0; }
 static int ubo_samp_id(const vka_bstate *s, uint32_t h) { int x = (int)(h >> 20); return x ? x + s->samp_base : 0; }
 
@@ -79,6 +144,13 @@ int vka_walk(const vka_bstate *s, int st, const dmsh_vk_entry *e, const dmsh_vk_
                         : b->kind == DMSH_VK_KIND_TEX_C2A ? (int)(vka_c2_handle(s, st, b->off + 8u * k) & 0xfffff)
                         : noslot ? 0 : (int)(vka_tex_slot(s, st, (unsigned)reg) & 0xfffff);
                 int sid = b->skind ? samp_of(s, st, b, k, rd, ctx) : 0;
+                if (tid) { r.what = VKA_R_TEX; r.tid = tid; r.sid = sid; }
+                break; }
+            case DMSH_VK_KIND_TEX_HP: {   // the handle from the record's program (BananzaNative, Eden-built libraries)
+                if (!vka_hp_blob) return refuse(why, whyn, "binding %u: a handle program with no library blob", b->binding);
+                const uint32_t *code = (const uint32_t *)(vka_hp_blob + (uint64_t)b->bytes * 16);
+                uint32_t h = hp_eval(s, st, bs, e->bind_count, code + 1, code[0], rd, ctx);
+                int tid = ubo_tex_id(s, h), sid = ubo_samp_id(s, h);
                 if (tid) { r.what = VKA_R_TEX; r.tid = tid; r.sid = sid; }
                 break; }
             case DMSH_VK_KIND_TBUF: {
