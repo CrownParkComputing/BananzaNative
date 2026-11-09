@@ -34,3 +34,4 @@ __pycache__/
 # ---- Linux builds ----
 build-linux/
 *.so
+readback_off

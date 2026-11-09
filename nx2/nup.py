@@ -478,8 +478,9 @@ def main():
     print("%s: %.2f GB, %d titles, %d dirs, %d files" % (os.path.basename(a.nup), nup.file_size / 1e9,
                                                           len(nup.titles), nup.nd, nup.nf))
     for t in nup.titles:
-        ex = list(nup.walk(t["exefs"]))
-        ro = list(nup.walk(t["romfs"]))
+        # (an add-on title has a romfs and no exefs: its directory index is 0xffffffff)
+        ex = list(nup.walk(t["exefs"])) if t["exefs"] != 0xffffffff else []
+        ro = list(nup.walk(t["romfs"])) if t["romfs"] != 0xffffffff else []
         print("title %d: %016x v%d  exefs %d files (%s)  romfs %d files, %.2f GB" % (
             t["index"], t["id"], t["version"], len(ex), ", ".join("%s %d" % (p, r[2]) for p, r in ex),
             len(ro), sum(r[2] for _, r in ro) / 1e9))

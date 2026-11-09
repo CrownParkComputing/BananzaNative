@@ -844,6 +844,9 @@ HLE(_ZN2nn2os15AllocateTlsSlotEPNS0_7TlsSlotEPFvmE) {
     RET(0x2C01);   /* os::ResultOutOfResource */
 }
 
+/* (bananza) SdkAllocateTlsSlot: the SDK's own libraries (nn::movie's Initialize) allocate through this one; left lifted it ran on
+   the SDK's TlsManager, whose state this runtime replaces (an abort in TlsManager::AllocateTlsSlot eleven minutes into play) */
+HLE(_ZN2nn2os18SdkAllocateTlsSlotEPNS0_7TlsSlotEPFvmE) { imp__ZN2nn2os15AllocateTlsSlotEPNS0_7TlsSlotEPFvmE(c); }
 HLE(_ZN2nn2os11FreeTlsSlotENS0_7TlsSlotE) { if ((uint32_t)ARG(0) < HOS_TLS_SLOTS) slot_used[(uint32_t)ARG(0)] = 0; }
 HLE(_ZN2nn2os11GetTlsValueENS0_7TlsSlotE) { RET((uint32_t)ARG(0) < HOS_TLS_SLOTS ? cur->tls_slots[(uint32_t)ARG(0)] : 0); }
 HLE(_ZN2nn2os11SetTlsValueENS0_7TlsSlotEm) { if ((uint32_t)ARG(0) < HOS_TLS_SLOTS) cur->tls_slots[(uint32_t)ARG(0)] = ARG(1); }

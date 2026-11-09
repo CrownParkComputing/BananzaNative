@@ -66,6 +66,8 @@ static void no_power_throttling(void) {
 #endif
 
 int hos_game_is_mkw(void) { return !strcmp(hos_main_build_id, "d00e4f399e411d0613aa8d26b1c02fef"); }
+/* (bananza) Donkey Kong Bananza v458752: its own movie player over nn::codec, not nn::movie's VideoDecoder */
+int hos_game_is_dkb(void) { return !strncmp(hos_main_build_id, "e25c90c1c136638885659fd55bf8a03b", 32); }
 
 /* gen/hos_image.c (build.py lift) */
 extern const uint64_t hos_main_stack_size;

@@ -870,3 +870,10 @@ HLE(_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi) {
     G64(ARG(0)) = (uint64_t)InterlockedIncrement64(&sampling);
     RET(1);
 }
+/* (bananza) GetTouchScreenState<1>(TouchScreenState<1>*): the latest state, no touches. The SDK's own aborted on the
+   touch screen's shared memory this runtime does not have. TouchScreenState<1>: {s64 sampling number, s32 count, s32 reserved, TouchState}. */
+HLE(_ZN2nn3hid19GetTouchScreenStateILm1EEEvPNS0_16TouchScreenStateIXT_EEE) {
+    static volatile LONG64 sampling;
+    memset(GP(ARG(0)), 0, 16 + 0x28);
+    G64(ARG(0)) = (uint64_t)InterlockedIncrement64(&sampling);
+}

@@ -1,0 +1,29 @@
+name: upstream watch
+# Daily: is NotRexed/Hookshot past the commit this fork last merged (.upstream-sha)? Then one issue, kept up to date.
+on:
+  schedule: [{cron: "17 6 * * *"}]
+  workflow_dispatch:
+permissions: {issues: write, contents: read}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compare with upstream
+        id: cmp
+        run: |
+          git remote add upstream https://github.com/NotRexed/Hookshot.git
+          git fetch -q upstream main
+          LAST=$(cat .upstream-sha); NEW=$(git rev-parse upstream/main)
+          if [ "$LAST" = "$NEW" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          { echo "Upstream Hookshot moved from \`$LAST\` to \`$NEW\` ($(git rev-list --count $LAST..$NEW) commits):"; echo; echo '```';
+            git log --oneline $LAST..$NEW | head -60; echo '```'; echo;
+            echo "Merge locally with \`scripts/upstream-check.sh --merge\`, rebuild (lift + build), test, then \`scripts/upstream-check.sh --mark\`."; } > body.md
+      - name: open or update the issue
+        if: steps.cmp.outputs.changed == 'true'
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          T="Upstream Hookshot has new commits"
+          N=$(gh issue list --state open --search "\"$T\" in:title" --json number --jq '.[0].number')
+          if [ -n "$N" ]; then gh issue edit "$N" --body-file body.md; else gh issue create --title "$T" --body-file body.md; fi

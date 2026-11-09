@@ -541,6 +541,19 @@ HLE(_ZN2nn2os23SignalConditionVariableEPNS0_21ConditionVariableTypeE) {
     ReleaseSRWLockExclusive(&cv->lk);
     WakeConditionVariable(&cv->cv);
 }
+/* (bananza) BroadcastConditionVariable: every waiter wakes. Left to the SDK (lifted), the broadcast signalled the SDK's
+   own condition-variable word while the waiters slept in this runtime's object: Donkey Kong Bananza's six
+   VoxelDisplayMeshUpdater threads never woke for their jobs and the main thread waited on their completion forever
+   (the freeze a minute into the mining tunnel). The mutex is reserved for the waiters as a signal does, one each. */
+HLE(_ZN2nn2os26BroadcastConditionVariableEPNS0_21ConditionVariableTypeE) {
+    Obj *cv = obj(ARG(0), K_COND);
+    if (watched_cv(ARG(0))) watch_log("broadcast", watch_mutex(), ARG(0), c, NULL);
+    AcquireSRWLockExclusive(&cv->lk);
+    for (int i = 0; i < cv->cv_waiting && i < 8; i++) cv_reserve(cv);   /* (its own guard stops at the waiters) */
+    cv->gen++;
+    ReleaseSRWLockExclusive(&cv->lk);
+    WakeAllConditionVariable(&cv->cv);
+}
 HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTypeE) {
     Obj *cv = obj(ARG(0), K_COND), *m = obj(ARG(1), K_MUTEX);
     const int w = watched(ARG(1));
@@ -555,7 +568,17 @@ HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTyp
     cv_enter(cv, m);
     /* release the guest mutex fully while holding the condvar's lock: a signal cannot slip in between */
     const int count = mutex_release_all(m);
-    while (cv->gen == gen) hos_cv_sleep(&cv->cv, &cv->lk, INFINITE);
+    {   /* (bananza, diagnostic) a wait of over 10 s names the condition variable, its mutex and the caller, once per wait */
+        int64_t told_at = hos_now_ns() + 10000000000ll;
+        while (cv->gen == gen) {
+            hos_cv_sleep(&cv->cv, &cv->lk, 2000);
+            if (told_at && cv->gen == gen && hos_now_ns() > told_at) {
+                hos_log("condvar %#llx (mutex %#llx): %s waiting 10 s (lr %#llx, %d waiting)", (unsigned long long)ARG(0),
+                        (unsigned long long)ARG(1), hos_thread_name(hos_self()), (unsigned long long)c->x[30], cv->count);
+                told_at = 0;
+            }
+        }
+    }
     const int owed = cv_leave(cv, m);
     ReleaseSRWLockExclusive(&cv->lk);
     if (w) watch_log(owed ? "cv woken, owed the mutex" : "cv woken", ARG(1), ARG(0), c, m);

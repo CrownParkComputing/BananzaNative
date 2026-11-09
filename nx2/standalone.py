@@ -22,10 +22,12 @@ import toolchain
 HOST = os.path.join(kit.HERE, "..", "host")
 
 # a64-kit's list (TOTK), plus the Switch 2 SDK's service namespaces MKW imports (imports.py)
+# (bananza) "movie" is not stubbed: nn::movie::Initialize sets up the SDK's own MediaExtractor (the WebM demuxer,
+# lifted), and a stubbed Initialize left it unset (MediaExtractor::Initialize aborted at +0x2b0)
 OS_NAMESPACES = {"audio", "hid", "oe", "prepo", "nfp", "time", "account", "vi", "swkbd", "pl", "err", "codec", "diag",
                  "detail", "settings", "ns", "applet", "album", "friends", "nifm", "ssl", "socket", "ec", "bcat",
                  "web", "ldn", "irsensor", "aoc", "olsc", "pctl", "apm", "ro",
-                 "chat", "camera", "gs", "movie", "npns", "news", "fatal", "lbl", "capture", "syncpt"}
+                 "chat", "camera", "gs", "npns", "news", "fatal", "lbl", "capture", "syncpt", "streamplay"}
 
 
 def implemented(host=HOST):

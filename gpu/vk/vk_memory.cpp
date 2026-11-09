@@ -34,6 +34,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -166,14 +167,22 @@ VkDeviceMemory dma_buf_memory(uint64_t lo, uint64_t size) {
     ai.allocationSize = size;
     ai.memoryTypeIndex = type;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    // (a second descriptor of the same dma-buf: after a failed import the spec leaves the fd ours, but NVIDIA's driver
+    // has closed it already, and closing it again here closed whatever had been given that number since (libudev's,
+    // through SDL: its safe_close asserted EBADF and the game aborted). The duplicate tells the two apart: the fd is
+    // closed here only while it still names the same file)
+    const int dfd = dup(fd);
     const VkResult r = vkAllocateMemory(dev.device, &ai, nullptr, &memory);
-    if (r != VK_SUCCESS) {   // (the fd is the caller's again when the import fails)
-        close(fd);
+    if (r != VK_SUCCESS) {
+        struct stat a {}, b {};
+        if (dfd >= 0 && fstat(fd, &a) == 0 && fstat(dfd, &b) == 0 && a.st_ino == b.st_ino && a.st_dev == b.st_dev) close(fd);
+        if (dfd >= 0) close(dfd);
         if (dmabuf_failures++ < 8)
             logf("vk: guest %#llx..%#llx: its dma-buf not imported (VkResult %d)", (unsigned long long)lo,
                  (unsigned long long)(lo + size), (int)r);
         return VK_NULL_HANDLE;
     }
+    if (dfd >= 0) close(dfd);
     return memory;
 }
 

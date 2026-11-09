@@ -296,6 +296,16 @@ HLE(_ZN2nn5prepo12AsyncContext9GetResultEv) { RET(0); }
 HLE(_ZN2nn5prepo12AsyncContextD1Ev) {}
 
 /* ---- (mkw-recomp) MKW's account and oe calls TOTK never made: the one user, offline ------------------------- */
+/* (bananza) GetLastOpenedUser(Uid* out) -> Result: the one user, as every other account answer */
+HLE(_ZN2nn7account17GetLastOpenedUserEPNS0_3UidE) {
+    G64(ARG(0)) = user_uid[0];
+    G64(ARG(0) + 8) = user_uid[1];
+    RET(0);
+}
+/* (bananza) nn::nfp (amiibo): the library initialises, its availability event is bound and never signals (no reader) */
+void hos_system_event_init(uint64_t key, int autoclear);   /* nn_os_sync.c */
+HLE(_ZN2nn3nfp10InitializeEv) { RET(0); }
+HLE(_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE) { if (ARG(0)) hos_system_event_init(ARG(0), 0); RET(0); }
 /* ListAllUsers(int* count, Uid* out, int max) -> Result */
 HLE(_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi) {
     const int n = (int)ARG(2) > 0 ? 1 : 0;
