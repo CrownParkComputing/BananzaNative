@@ -122,8 +122,10 @@ Still open before a phone plays it (in order):
 2. Module variants the Ryujinx library has and this one does not: `UINT` / `UINT_MIXED` colour outputs (fragment shaders drawn
    to integer attachments: Eden bakes the output type from the render target at run time, the library needs the per-entry
    variant), `DUAL` (dual-source blend, from the game's `dual_want.tsv`), `SHUFFLE_LDS` (Turnip without arbitrary shuffles).
-3. Fragment-depth writes (123 `DepthReplacing` modules) keep the translated convention; the vertex stage's GL-depth constant
-   does not reach them.
+3. Fragment-depth writes (123 `DepthReplacing` modules) keep the translated convention, as the Ryujinx library's do (android/SHADERS.md
+   "Depth": only position-writing stages carry the constant) — parity, not a gap. Vertex inputs and colour outputs are declared float
+   (`vin_types` / `fout_types` 0); the replay retypes them per draw for integer formats (`vin_u`/`vin_s`, `VKA_FS_RETYPE`), so the
+   `UINT` variants of item 2 matter only to a replay without that retyping.
 4. Geometry and tessellation stages (911): Hookshot's parser does not decode them; the Android replay draws them.
 5. Step 2 of the plan, done as `android/bananative/scripts/pack_android.py --shader-lib <dmsh_vk.lib>`: the pack takes the Eden-built
    library as it is (stamp written from its header: game id, inputs `eden-hookshot`), no translator and no .NET run. Tested on

@@ -37,6 +37,22 @@ commits" when upstream moved past `.upstream-sha`. After a merge and a successfu
 
 Licence: GPL-3.0-or-later, as Hookshot.
 
+## Android shader library without .NET
+
+The Android build (`android/bananative`, moceure's BananaNative) loads its shaders from one library per game, `dmsh_vk.lib`,
+which upstream builds with Ryujinx's C# translator on .NET. This tree writes the same file from Eden's C++ recompiler:
+
+    # after the Linux build and the shader seed (nx2/shader_census.py → work/sa/build/hookshot_shaders.bin)
+    cd work/sa/build
+    HOS_HEADLESS=1 RX_VK_DMSH_GAME=040074A01BF12000 ./hookshot ../image/image.bin --romfs /mnt/Data/bananza-dump/romfs \
+        --user ../../user --write-dmsh /mnt/Data/bananza-eden-lib        # → v-<chain>/dmsh_vk.lib + eden_report.txt
+    tools/dmsh_check.sh                                                   # builds BananaNative's reader on Linux (once)
+    tools/dmsh_check /mnt/Data/bananza-eden-lib/v-*/dmsh_vk.lib --val     # reader + spirv-val over every module
+    android/bananative/scripts/pack_android.py <game> --shader-lib /mnt/Data/bananza-eden-lib/v-*/dmsh_vk.lib   # pack it, no .NET
+
+`RX_VK_DMSH_RAW=1` keeps the modules uncompressed (zstd otherwise). What the library carries and what is still open is in
+`docs/VULKAN_SHARED_PLAN.md`.
+
 ## Mario Kart World too
 
 The same tree runs Mario Kart World (`0400C3F00006E000`, v917504 — the build Hookshot's runtime was first written for):
