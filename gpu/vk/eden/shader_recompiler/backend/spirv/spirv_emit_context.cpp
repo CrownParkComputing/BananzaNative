@@ -590,6 +590,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program.info, image_binding);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
+    DefineDmshSupport(program.info, image_binding);
 }
 
 EmitContext::~EmitContext() = default;
@@ -1762,6 +1763,39 @@ void EmitContext::DefineRescalingInputUniformConstant() {
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_uniform_constant);
     }
+}
+
+// (hookshot, Profile::dmsh_spec) the support uniform buffer of a fragment stage that writes colour 0 (the alpha test's reference in word 0,
+// dmsh_abi_vk.h DMSH_VK_KIND_SUPPORT), the stage's last binding; and the vertex stage's GL depth constant is noted for the writer
+void EmitContext::DefineDmshSupport(Info& info, u32& binding) {
+    if (!profile.dmsh_spec) {
+        return;
+    }
+    if (stage == Stage::VertexB) {
+        dmsh_gl_depth = SpecConstantFalse(U1);
+        Decorate(dmsh_gl_depth, spv::Decoration::SpecId, 0U);
+        info.dmsh_gl_depth_spec = true;
+    }
+    if (stage != Stage::Fragment || !Sirit::ValidId(frag_color[0])) {
+        return;
+    }
+    const Id array_type{TypeArray(U32[1], Const(512U))};
+    Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+    const Id struct_type{TypeStruct(array_type)};
+    Decorate(struct_type, spv::Decoration::Block);
+    MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+    Name(struct_type, "dmsh_support_block");
+    dmsh_support = AddGlobalVariable(TypePointer(spv::StorageClass::Uniform, struct_type), spv::StorageClass::Uniform);
+    dmsh_support_u32 = TypePointer(spv::StorageClass::Uniform, U32[1]);
+    Decorate(dmsh_support, spv::Decoration::Binding, binding++);
+    Decorate(dmsh_support, spv::Decoration::DescriptorSet, 0U);
+    Name(dmsh_support, "dmsh_support");
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(dmsh_support);
+    }
+    dmsh_alpha_func = SpecConstant(U32[1], 0U);
+    Decorate(dmsh_alpha_func, spv::Decoration::SpecId, 1U);
+    info.dmsh_alpha_spec = true;
 }
 
 void EmitContext::DefineRenderArea(const Info& info) {

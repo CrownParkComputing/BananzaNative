@@ -79,28 +79,50 @@ records is the core of the work, not a new translator.
 - Running the x86 recompiled C on ARM64: possible in principle (the lifted C is portable) but strictly worse than
   running the game's own ARM64 code natively, which the Android side already does.
 
-## Step 1 — first result (2026-11-09)
+## Step 1 — results (2026-11-09)
 
 `hookshot --write-dmsh <dir>` (the writer at the end of `gpu/vk/vk_shader.cpp`, `dmsh_write_library`) over Bananza's seed
 (22,549 stages), then `tools/dmsh_check` (BananaNative's `vka_shlib.c` reader compiled on Linux, `tools/dmsh_check.sh`)
 with `spirv-val --target-env vulkan1.3 --uniform-buffer-standard-layout`:
 
-| | |
-|---|---|
-| translated and written | **21,496 stages** (8,920 vertex, 12,430 fragment, 146 compute) in 39 s, 884 MB of raw SPIR-V |
-| refused by the file reader | 0 entries, 0 unreadable modules |
-| `spirv-val` failures | **0** (21,001 without the uniform-buffer-standard-layout rule: Eden lays constant buffers out as `u32[]` with stride 4) |
-| bindings | 147,242: cbuf 68,158, tex 70,501, sbuf 3,435, drvcb 2,594, c1 2,121, img 154, **unknown 279 in 129 entries** |
-| not written | 911 stages Hookshot's parser rejects (geometry / tessellation, which it never draws); 0 with cooperative matrices |
+| | first writer | writer v4 (current) |
+|---|---|---|
+| translated and written | 21,496 stages (8,920 vertex, 12,430 fragment, 146 compute) | same, 66 s |
+| library size | 884 MB raw SPIR-V | **249 MB** (one zstd frame per module, `DMSH_VK_CODEC_ZSTD`) |
+| refused by the file reader | 0 | 0 |
+| `spirv-val` failures | 0 | **0** |
+| bindings the replay cannot fill | 279 unknown + 47 `NOSLOT` | **0** |
+| not written | 911 stages Hookshot's parser rejects (geometry / tessellation, which it never draws) | same |
 
-What is left before a phone can play it (in order):
-1. The Android device must enable what Eden's modules assume: `uniformBufferStandardLayout` (Vulkan 1.2), 8/16-bit storage and
-   int8/16/64/float16 as the Adreno reports them (`vka_dev.c` asks for bufferDeviceAddress and update-after-bind today).
-2. The 129 entries with an unknown binding: compute-stage texture/image handles (Eden reads them from c0's per-shader
-   layout; the record needs the slot the host binds, as `dmsh_build.py` derives it) and handles Eden resolves at draw time.
-3. Variants and specialization constants the replay expects of a library (`DMSH_VK_SPEC_GL_DEPTH`, the alpha test, UINT
-   colour outputs, dual-source): today the base module only, depth convention left as translated.
-4. Header `subgroup_size` 32: the replay pins fragment/compute to 32 lanes where the device allows and rewrites the vertex
-   pipeline to one-lane subgroups otherwise; 64-lane emission (Eden `max_subgroup_size`) is the alternative.
-5. zstd modules (`DMSH_VK_CODEC_ZSTD`) to bring 884 MB down to ~200.
-6. On the phone: `DM_VK_SHLIB=<this dmsh_vk.lib>` with `DM_VK_SHLIB_CHECK=1`, draws compared with the Ryujinx library.
+What v2–v4 added, all on the Eden side (no change to BananaNative's replay or ABI):
+- **Compute handles and pointers by the program's c0 layout** (`compute_c0_layout`): textures/images from the per-shader
+  handle tables, storage buffers from the ssbo table or the uniform-pointer table (`UBO_PTR`), push-constant reads moved to the
+  push bank (`DRVCB` reg 24).
+- **Raw global memory through the phone's pool table** (`Profile::gmem_map`): the 47 compute programs that read memory through
+  pointers (Hookshot's 3-region table at c0+0x880 on Linux) now declare `gmem_map` / `gmem_log` as their last storage buffers;
+  Eden's global-memory fallbacks search the table by the 2 MiB chunk hint, then a branchless bisection, and load/store/atomic
+  through a physical storage buffer pointer at address + delta, the sink taking misses; stores set their entry's bit in the log.
+  48 programs use it, 31 store through it.
+- **Specialization constants** (`Profile::dmsh_spec`): every vertex module carries SpecId 0 (`DMSH_VK_SPEC_GL_DEPTH`, the
+  depth conversion under a select) and is flagged `F_GL_DEPTH`; every fragment module writing colour 0 carries SpecId 1
+  (`DMSH_VK_SPEC_ALPHA_FUNC`) with a `SUPPORT` uniform buffer as its last binding (word 0 = the reference) and is flagged
+  `F_ALPHA_TEST`. Sirit gained `SpecConstantFalse` / `SpecConstant`.
+- **64 lanes**: emitted with `max_subgroup_size 64` and `warp_size_potentially_larger_than_guest`, header `subgroup_size 64`,
+  so the replay pins fragment and compute to 64 on Adreno instead of rewriting every stage to one-lane subgroups.
+
+Capabilities the modules declare (census over all 21,496): float controls (SignedZeroInfNanPreserve on all, DenormFlushToZero
+on 10,552), Int16 5,095, Int8 2,996, Int64 136, Float16 110, DrawParameters 3,343, GroupNonUniform* 235–238,
+PhysicalStorageBufferAddresses 48, DemoteToHelperInvocation 5,770, DepthReplacing 123. `vka_dev.c` enables every feature the
+physical device reports (Vulkan 1.1–1.3 feature structs passed back as queried), so the open question is only whether the
+Adreno reports them — float-controls properties and `uniformBufferStandardLayout` in particular.
+
+Still open before a phone plays it (in order):
+1. On the phone: `DM_VK_SHLIB=<this dmsh_vk.lib>` with `DM_VK_SHLIB_CHECK=1`, draws compared with the Ryujinx library. No
+   phone is attached to this machine; the library is at `/mnt/Data/bananza-eden-lib/v4/v-0035e16073bf/dmsh_vk.lib`.
+2. Module variants the Ryujinx library has and this one does not: `UINT` / `UINT_MIXED` colour outputs (fragment shaders drawn
+   to integer attachments: Eden bakes the output type from the render target at run time, the library needs the per-entry
+   variant), `DUAL` (dual-source blend, from the game's `dual_want.tsv`), `SHUFFLE_LDS` (Turnip without arbitrary shuffles).
+3. Fragment-depth writes (123 `DepthReplacing` modules) keep the translated convention; the vertex stage's GL-depth constant
+   does not reach them.
+4. Geometry and tessellation stages (911): Hookshot's parser does not decode them; the Android replay draws them.
+5. Step 2 of the plan: `scripts/pack_android.py --translator eden` calling this writer, and `bananative_env.py` without .NET.

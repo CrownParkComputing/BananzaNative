@@ -20,6 +20,50 @@ void ConvertDepthMode(EmitContext& ctx) {
     ctx.OpStore(ctx.output_position, vector);
 }
 
+// (hookshot, Profile::dmsh_spec) the same conversion under the library's bool specialization constant SpecId 0 (DMSH_VK_SPEC_GL_DEPTH),
+// false by default: the replay sets it on the last pre-raster stage of a GL-depth-mode pipeline
+void ConvertDepthModeSpec(EmitContext& ctx) {
+    const Id type{ctx.F32[1]};
+    const Id gl{ctx.dmsh_gl_depth};
+    const Id position{ctx.OpLoad(ctx.F32[4], ctx.output_position)};
+    const Id z{ctx.OpCompositeExtract(type, position, 2u)};
+    const Id w{ctx.OpCompositeExtract(type, position, 3u)};
+    const Id screen_depth{ctx.OpFMul(type, ctx.OpFAdd(type, z, w), ctx.Constant(type, 0.5f))};
+    const Id vector{ctx.OpCompositeInsert(ctx.F32[4], ctx.OpSelect(type, gl, screen_depth, z), position, 2u)};
+    ctx.OpStore(ctx.output_position, vector);
+}
+
+// (hookshot, Profile::dmsh_spec) the alpha test under the library's uint specialization constant SpecId 1 (DMSH_VK_SPEC_ALPHA_FUNC: NVN_ALPHA_FUNC_*,
+// 1 never, 2 less, 3 equal, 4 lequal, 5 greater, 6 notequal, 7 gequal, 8 always; 0 = none) against the reference in word 0 of the support buffer
+void AlphaTestSpec(EmitContext& ctx) {
+    const Id type{ctx.F32[1]};
+    const Id func{ctx.dmsh_alpha_func};
+    const Id rt0_color{ctx.OpLoad(ctx.F32[4], ctx.frag_color[0])};
+    const Id alpha{ctx.OpCompositeExtract(type, rt0_color, 3u)};
+    const Id ref_bits{ctx.OpLoad(ctx.U32[1], ctx.OpAccessChain(ctx.dmsh_support_u32, ctx.dmsh_support, ctx.u32_zero_value, ctx.u32_zero_value))};
+    const Id ref{ctx.OpBitcast(type, ref_bits)};
+    const Id lt{ctx.OpFOrdLessThan(ctx.U1, alpha, ref)};
+    const Id eq{ctx.OpFOrdEqual(ctx.U1, alpha, ref)};
+    const Id gt{ctx.OpFOrdGreaterThan(ctx.U1, alpha, ref)};
+    const auto is{[&](u32 f) { return ctx.OpIEqual(ctx.U1, func, ctx.Const(f)); }};
+    // pass: true for 0 and 8; the comparison for 2..7; false for 1
+    Id pass{ctx.true_value};
+    pass = ctx.OpSelect(ctx.U1, is(1U), ctx.false_value, pass);
+    pass = ctx.OpSelect(ctx.U1, is(2U), lt, pass);
+    pass = ctx.OpSelect(ctx.U1, is(3U), eq, pass);
+    pass = ctx.OpSelect(ctx.U1, is(4U), ctx.OpLogicalOr(ctx.U1, lt, eq), pass);
+    pass = ctx.OpSelect(ctx.U1, is(5U), gt, pass);
+    pass = ctx.OpSelect(ctx.U1, is(6U), ctx.OpLogicalNot(ctx.U1, eq), pass);
+    pass = ctx.OpSelect(ctx.U1, is(7U), ctx.OpLogicalOr(ctx.U1, gt, eq), pass);
+    const Id true_label{ctx.OpLabel()};
+    const Id discard_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(true_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(pass, true_label, discard_label);
+    ctx.AddLabel(discard_label);
+    ctx.OpKill();
+    ctx.AddLabel(true_label);
+}
+
 void SetFixedPipelinePointSize(EmitContext& ctx) {
     if (ctx.runtime_info.fixed_state_point_size) {
         const float point_size{*ctx.runtime_info.fixed_state_point_size};
@@ -147,11 +191,15 @@ void EmitEpilogue(EmitContext& ctx) {
         EmitMeshEpilogue(ctx);
         return;
     }
-    if (ctx.stage == Stage::VertexB && ctx.runtime_info.convert_depth_mode &&
+    if (ctx.stage == Stage::VertexB && ctx.profile.dmsh_spec && Sirit::ValidId(ctx.dmsh_gl_depth)) {
+        ConvertDepthModeSpec(ctx);
+    } else if (ctx.stage == Stage::VertexB && ctx.runtime_info.convert_depth_mode &&
         !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
-    if (ctx.stage == Stage::Fragment) {
+    if (ctx.stage == Stage::Fragment && ctx.profile.dmsh_spec && Sirit::ValidId(ctx.dmsh_support)) {
+        AlphaTestSpec(ctx);
+    } else if (ctx.stage == Stage::Fragment) {
         AlphaTest(ctx);
     }
 }

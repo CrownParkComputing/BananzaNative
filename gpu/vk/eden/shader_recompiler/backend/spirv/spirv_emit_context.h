@@ -308,6 +308,10 @@ public:
     bool wants_guest_pages{};
     Id gmem_map_var{};   // (hookshot, Profile::gmem_map: BananaNative's pool table and write log, u32x2 / u32 storage buffers)
     Id gmem_log_var{};
+    Id dmsh_support{};   // (hookshot, Profile::dmsh_spec: the fragment stage's support uniform buffer, u32 words; word 0 = the alpha test's reference bits)
+    Id dmsh_support_u32{};   // (its element pointer type)
+    Id dmsh_gl_depth{};      // (the SpecId 0 bool and the SpecId 1 uint, made once: the epilogue runs at every return, and a second SpecId on the folded constant is invalid)
+    Id dmsh_alpha_func{};
     Id probe_log{};   // (EvilOOT, RX_VK_BLOCK_PROBE: the miss log's U32 storage buffer, per-block entry counters at word 128+)
     u32 mesh_first_member_index{};    // (hookshot: MESH_FIRST_PUSH_OFFSET's member, task programs)
     bool wants_mesh_first{};
@@ -461,6 +465,7 @@ private:
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(Info& info, u32& binding);
+    void DefineDmshSupport(Info& info, u32& binding);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();

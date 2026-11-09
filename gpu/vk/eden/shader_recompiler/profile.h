@@ -72,6 +72,10 @@ struct Profile {
     /// physical storage buffer pointer at address + the pool's delta; stores also set their entry's bit in the write log)
     /// instead of the host's page table in the push block
     bool gmem_map{};
+    /// (hookshot, the Android library: dmsh_abi_vk.h) the vertex stage's depth conversion under the bool specialization constant
+    /// SpecId 0 (DMSH_VK_SPEC_GL_DEPTH) instead of RuntimeInfo::convert_depth_mode, and the fragment stage's alpha test under the
+    /// uint SpecId 1 (DMSH_VK_SPEC_ALPHA_FUNC, NVN_ALPHA_FUNC_*, 0 none) against word 0 of a support uniform buffer the replay fills
+    bool dmsh_spec{};
 
     bool lower_left_origin_mode{};
     /// Fragment outputs have to be declared even if they are not written to avoid undefined values.

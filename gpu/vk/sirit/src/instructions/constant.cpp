@@ -27,6 +27,16 @@ Id Module::Constant(Id result_type, const Literal& literal) {
     return *declarations << OpId{spv::Op::OpConstant, result_type} << literal << EndOp{};
 }
 
+Id Module::SpecConstantFalse(Id result_type) {
+    declarations->Reserve(3);
+    return *declarations << OpId{spv::Op::OpSpecConstantFalse, result_type} << EndOp{};
+}
+
+Id Module::SpecConstant(Id result_type, const Literal& literal) {
+    declarations->Reserve(3 + 2);
+    return *declarations << OpId{spv::Op::OpSpecConstant, result_type} << literal << EndOp{};
+}
+
 Id Module::ConstantComposite(Id result_type, std::span<const Id> constituents) {
     declarations->Reserve(3 + constituents.size());
     return *declarations << OpId{spv::Op::OpConstantComposite, result_type} << constituents

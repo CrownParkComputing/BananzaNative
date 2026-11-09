@@ -17,6 +17,7 @@
 #include <io.h>
 #include <algorithm>
 #include <cctype>
+#include <zstd.h>
 #include <chrono>
 #include <stdexcept>
 #include <cstdio>
@@ -2686,6 +2687,9 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         }
         Shader::Profile p = profile();
         p.gmem_map = true;
+        p.dmsh_spec = true;
+        p.max_subgroup_size = 64;   // (the phone's lanes: Adreno runs 64 (or 128, pinned to 64); the header says so, and the replay pins fragment and compute to it)
+        p.warp_size_potentially_larger_than_guest = true;
         spirv = Shader::Backend::SPIRV::EmitSPIRV(p, rt, t->program, bindings);
     } catch (const std::exception& e) {
         return why = e.what(), false;
@@ -2697,6 +2701,8 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     e.stage = (uint8_t)ds;
     e.mod_count = 1;
     if (info.uses_subgroup_invocation_id || info.uses_subgroup_shuffles || info.uses_quad_shuffles) e.flags |= DMSH_VK_F_SUBGROUP;
+    if (info.dmsh_gl_depth_spec) e.flags |= DMSH_VK_F_GL_DEPTH;
+    if (info.dmsh_alpha_spec) e.flags |= DMSH_VK_F_ALPHA_TEST;
     if (info.uses_fp64) e.flags |= 0;   // (the device's shaderFloat64 decides; nothing lowered here)
     for (int i = 0; i < 3; i++) e.local[i] = (uint16_t)std::max(1u, t->program.workgroup_size[i]);
     e.shared = t->program.shared_memory_size;
@@ -2769,6 +2775,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     if (info.uses_gmem_map) rec(DMSH_VK_KIND_GMEM_MAP, 7, 1);
     if (info.uses_gmem_log) { dmsh_vk_bind* r = rec(DMSH_VK_KIND_GMEM_LOG, 7, 1); r->flags |= DMSH_VK_BF_RW; out.gmem_log++; }
     if (info.uses_gmem_map) out.gmem_map++;
+    if (info.dmsh_alpha_spec) rec(DMSH_VK_KIND_SUPPORT, 6 /* UNIFORM_BUFFER */, 1);   // (the alpha test's reference: word 0)
     e.bind_count = (uint16_t)out.binds.size();
     e.c1_len = (uint32_t)out.c1.size();
     return true;
@@ -2818,8 +2825,18 @@ bool dmsh_write_library(const char* dir) {
         binds.insert(binds.end(), d.out.binds.begin(), d.out.binds.end());
         e.mod = (uint32_t)mods.size();
         dmsh_vk_module m{};
-        const uint64_t o = put(d.out.spirv.data(), d.out.spirv.size() * 4);
-        m.off = (uint32_t)o, m.off_hi = (uint16_t)(o >> 32), m.size = m.stored = (uint32_t)(d.out.spirv.size() * 4), m.variant = DMSH_VK_MOD_BASE, m.codec = DMSH_VK_CODEC_RAW;
+        // (one zstd frame per module, about a fifth of the size; RX_VK_DMSH_RAW=1 keeps the words as they are)
+        const size_t raw = d.out.spirv.size() * 4;
+        static const bool keep_raw = getenv("RX_VK_DMSH_RAW") != nullptr;
+        std::vector<uint8_t> z;
+        if (!keep_raw) {
+            z.resize(ZSTD_compressBound(raw));
+            const size_t n = ZSTD_compress(z.data(), z.size(), d.out.spirv.data(), raw, 9);
+            if (ZSTD_isError(n) || n >= raw) z.clear(); else z.resize(n);
+        }
+        const uint64_t o = z.empty() ? put(d.out.spirv.data(), raw) : put(z.data(), z.size());
+        m.off = (uint32_t)o, m.off_hi = (uint16_t)(o >> 32), m.size = (uint32_t)raw, m.stored = (uint32_t)(z.empty() ? raw : z.size()), m.variant = DMSH_VK_MOD_BASE;
+        m.codec = z.empty() ? DMSH_VK_CODEC_RAW : DMSH_VK_CODEC_ZSTD;
         mods.push_back(m);
         ents.push_back(e);
     }
@@ -2833,7 +2850,7 @@ bool dmsh_write_library(const char* dir) {
     h.bind_count = (uint32_t)binds.size(), h.bind_off = h.entry_off + h.entry_count * DMSH_VK_ENTRY_SIZE;
     h.mod_count = (uint32_t)mods.size(), h.mod_off = h.bind_off + h.bind_count * DMSH_VK_BIND_SIZE;
     h.blob_off = (h.mod_off + h.mod_count * DMSH_VK_MOD_SIZE + 15) / 16 * 16, h.blob_size = blob.size();
-    h.subgroup_size = 32;   // (Eden's modules are written for 32 lanes: the replay pins the stage to 32 where it can)
+    h.subgroup_size = 64;   // (Eden's modules are written for 64 lanes, right on 32 too: the replay pins fragment and compute to 64 where it can)
     h.ssbo_align = 0;       // (storage buffers at their exact address)
     std::string vdir = std::string(dir) + "/" DMSH_VK_DIR_PREFIX DMSH_VK_CHAIN;
     mkdir(dir, 0755), mkdir(vdir.c_str(), 0755);

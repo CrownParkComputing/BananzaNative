@@ -357,6 +357,8 @@ struct Info {
     bool uses_global_memory{};
     bool uses_gmem_map{};   // (hookshot, Profile::gmem_map: the back end declared the pool table (and the write log) as the last storage buffers)
     bool uses_gmem_log{};
+    bool dmsh_gl_depth_spec{};   // (Profile::dmsh_spec: the module has SpecId 0, the GL depth bool)
+    bool dmsh_alpha_spec{};      // (Profile::dmsh_spec: the module has SpecId 1, the alpha function, and the support buffer as its last binding)
     bool uses_atomic_image_u32{};
     bool uses_shadow_lod{};
     bool uses_rescaling_uniform{};
