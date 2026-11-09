@@ -346,6 +346,14 @@ void driver_bank_fill(const NvnState& s, int bank, int stage, uint8_t* d, uint32
     if (stage == 0) put(0x610, std::bit_cast<uint32_t>(2047.9375f));
 }
 
+/// (bananza) the compute program's c0 layout for the Android library writer (vk_shader.cpp dmsh): where the push area,
+/// the uniform and storage buffer tables and the texture and image handle slots lie, and how many of each
+void compute_c0_layout(const NvnState& s, uint32_t out[9]) {
+    const CsLayout l = cs_layout(s);
+    out[0] = l.push, out[1] = l.ubo_at(), out[2] = l.ssbo_at(), out[3] = l.tex_at(), out[4] = l.img_at();
+    out[5] = l.ubo, out[6] = l.ssbo, out[7] = l.tex, out[8] = l.img;
+}
+
 /// (hookshot) the bound compute program's texture and image slot counts (its control section's)
 void cs_slot_counts(const NvnState& s, uint32_t* tex, uint32_t* img) {
     const CsLayout l = cs_layout(s);

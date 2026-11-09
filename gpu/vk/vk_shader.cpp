@@ -2456,10 +2456,12 @@ void program_released(const nvn_prog* p) {
 // zeroed, then the code area; its first 8 bytes big-endian). What Eden resolves at draw time (handle programs: a texture
 // whose handle comes from a storage buffer) has no record kind: the entry is written with an unknown binding and the replay
 // refuses that shader, counted in the report. hookshot --write-dmsh <dir>: RX_VK_WRITE_DMSH names the folder. ----
+#include "../../android/bananative/dm/gfx/nvn/dmsh_abi.h"
 #include "../../android/bananative/dm/gfx/nvn/dmsh_abi_vk.h"
 #include "../../android/bananative/dm/gfx/nvn/dmsh_chain.h"
 #include "../../android/bananative/dm/gfx/nvn/dmsh_chain_vk.h"
 namespace mkwvk {
+void compute_c0_layout(const NvnState& s, uint32_t out[9]);   // (vk_bank.cpp)
 namespace {
 // SHA-256 (FIPS 180-4), for the keys
 struct Sha256 {
@@ -2524,6 +2526,40 @@ uint64_t dmsh_key(const uint8_t* ctl, const uint8_t* code, size_t code_len) {
     for (int i = 0; i < 8; i++) k = k << 8 | md[i];
     return k;
 }
+// (bananza) NVN2 compute reads its pushed constants from c0 right after the counts (0x10 .. 0x10 + push bytes); the Android
+// replay keeps them in bank DMSH_PUSH_BANK (24), which the game's shaders never name otherwise. Eden's info has room for
+// banks 0..17 only, so those reads move to bank 17 here (a bank the program must not use itself), and the binding record of
+// bank 17 says "the push bank": kind drvcb, reg 24. Returns the reads moved; -1 when the program uses bank 17 already or
+// reads the area with a computed offset (the shader is then written with its c0 reads as they are, counted by the caller)
+constexpr u32 kDmshPushAlias = 17;
+int dmsh_move_push_reads(Shader::IR::Program& program, uint32_t push_bytes) {
+    if (!push_bytes) return 0;
+    for (const auto& d : program.info.constant_buffer_descriptors)
+        if (d.index == kDmshPushAlias) return -1;
+    int moved = 0;
+    for (Shader::IR::Block* const block : program.blocks)
+        for (Shader::IR::Inst& inst : block->Instructions()) {
+            switch (inst.GetOpcode()) {
+            case Shader::IR::Opcode::GetCbufU8: case Shader::IR::Opcode::GetCbufS8: case Shader::IR::Opcode::GetCbufU16: case Shader::IR::Opcode::GetCbufS16:
+            case Shader::IR::Opcode::GetCbufU32: case Shader::IR::Opcode::GetCbufF32: case Shader::IR::Opcode::GetCbufU32x2: break;
+            default: continue;
+            }
+            const Shader::IR::Value bank = inst.Arg(0), off = inst.Arg(1);
+            if (!bank.IsImmediate() || bank.U32() != 0) continue;
+            if (!off.IsImmediate()) return -1;   // (a computed c0 offset: may reach the push area)
+            const u32 o = off.U32();
+            if (o < 0x10 || o >= 0x10 + push_bytes) continue;
+            inst.SetArg(0, Shader::IR::Value{kDmshPushAlias});
+            inst.SetArg(1, Shader::IR::Value{o - 0x10});
+            moved++;
+        }
+    if (moved) {
+        program.info.constant_buffer_descriptors.push_back({kDmshPushAlias, 1});
+        program.info.constant_buffer_used_sizes[kDmshPushAlias] = push_bytes;
+        program.info.constant_buffer_mask |= 1u << kDmshPushAlias;
+    }
+    return moved;
+}
 // NVN stage id (control +0x56) -> the ABI's stage number and the set-0 range it binds in
 int dmsh_stage(int nvn) {
     switch (nvn) {
@@ -2573,17 +2609,32 @@ struct DmshEntryOut {
     std::vector<uint8_t> c1;
     std::vector<uint32_t> spirv;
     int unknown = 0;   // bindings the replay cannot fill
+    int push_moved = 0;         // compute: c0 push-constant reads moved to the push bank
+    bool push_unmoved = false;  // compute: push reads left in c0 (computed offsets, or bank 17 in use)
+    std::vector<std::string> notes;   // what the report lists for this entry
 };
 // A texture or image handle's binding: from the c2 table (graphics, slot = (offset - 0x20) / 8), a uniform buffer word
 // (tex_ubo), or nothing this format names (compute's per-shader c0 layout, handle programs): unknown
 void dmsh_handle_bind(dmsh_vk_bind& b, int nvn_stage, uint32_t cbuf_index, uint32_t cbuf_offset, uint32_t handle_program, uint8_t kind, uint8_t ubo_kind,
-                      int* unknown) {
+                      int* unknown, const uint32_t cs[9]) {
     b.kind = kind;
     b.reg = -1;
     b.off = 0;
+    const bool image = kind == DMSH_VK_KIND_IMG;
     if (handle_program != ~0u) { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; return; }
-    if (cbuf_index == 2 && nvn_stage != 5 && cbuf_offset >= 0x20 && !((cbuf_offset - 0x20) & 7)) b.reg = (int16_t)((cbuf_offset - 0x20) / 8);
-    else if (cbuf_index >= 3 && cbuf_index < 19) b.kind = ubo_kind, b.reg = (int16_t)(cbuf_index - 3), b.off = (uint16_t)cbuf_offset;
+    if (nvn_stage == 5 && cbuf_index == 0) {   // (NVN2 compute: the handles in the program's own c0 layout, by slot)
+        const uint32_t at = image ? cs[4] : cs[3], n = image ? cs[8] : cs[7];
+        if (cbuf_offset >= at && cbuf_offset < at + 8 * n && !((cbuf_offset - at) & 7)) b.reg = (int16_t)((cbuf_offset - at) / 8);
+        else { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; }
+        return;
+    }
+    if (cbuf_index == 2 && nvn_stage != 5) {   // (the graphics handle tables of c2)
+        if (image && cbuf_offset >= DMSH_C2_IMG && cbuf_offset < DMSH_C2_IMG + 8 * DMSH_C2_IMG_SLOTS && !((cbuf_offset - DMSH_C2_IMG) & 7)) b.reg = (int16_t)((cbuf_offset - DMSH_C2_IMG) / 8);
+        else if (!image && cbuf_offset >= DMSH_C2_TEX && cbuf_offset < DMSH_C2_TEX + 8 * DMSH_C2_TEX_SLOTS && !((cbuf_offset - DMSH_C2_TEX) & 7)) b.reg = (int16_t)((cbuf_offset - DMSH_C2_TEX) / 8);
+        else if (!image && cbuf_offset >= DMSH_C2_SEPTEX && cbuf_offset < DMSH_C2_SEPTEX + 8 * DMSH_C2_SEP_SLOTS && !((cbuf_offset - DMSH_C2_SEPTEX) & 7))
+            b.reg = (int16_t)(DMSH_SEPTEX_SLOT0 + (cbuf_offset - DMSH_C2_SEPTEX) / 8);
+        else { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; }
+    } else if (cbuf_index >= 3 && cbuf_index < 19 && ubo_kind != DMSH_VK_KIND_UNKNOWN) b.kind = ubo_kind, b.reg = (int16_t)(cbuf_index - 3), b.off = (uint16_t)cbuf_offset;
     else { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; }
 }
 bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& why) {
@@ -2597,7 +2648,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     Shader::Stage shst = code.stage == 5 ? Shader::Stage::Compute : code.stage == 1 ? Shader::Stage::Fragment : Shader::Stage::VertexB;
     Shader::Backend::Bindings bindings{};
     bindings.unified = (u32)dmsh_range(ds) * DMSH_VK_STAGE_BINDINGS;
-    uint32_t cs_base = 0;
+    uint32_t cs_base = 0, cs[9] = {0};   // (compute: push bytes, ubo_at, ssbo_at, tex_at, img_at, ubo, ssbo, tex, img)
     struct Reset { ~Reset() { seed_cs_control = nullptr; Shader::Optimization::g_nvn2_compute_ssbo_base = 0, Shader::Optimization::g_nvn2_compute_ssbo_count = 16; Shader::Optimization::g_nvn2_compute_layout_end = 0; } } reset;
     if (code.stage == 5) {
         seed_cs_control = seed.blob.data() + st.control;
@@ -2607,6 +2658,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         Shader::Optimization::g_nvn2_compute_ssbo_count = count ? count : 16;
         Shader::Optimization::g_nvn2_compute_layout_end = count ? end : 0;
         if (!count) cs_base = 0x310;
+        compute_c0_layout(*blank, cs);
     }
     Env env{*blank, code, shst};
     std::unique_ptr<Translation> t;
@@ -2614,6 +2666,11 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     try {
         t = translate(env, code.stage != 5);
         if (t->program.info.uses_cooperative_matrix) return why = "cooperative matrices (no lowering for the phone yet)", false;
+        if (code.stage == 5) {
+            const int moved = dmsh_move_push_reads(t->program, cs[0]);
+            if (moved < 0) out.push_unmoved = true;
+            else out.push_moved = moved;
+        }
         Shader::RuntimeInfo rt{};
         if (code.stage == 0) {
             if (!t->program.info.stores[Shader::IR::Attribute::PointSize]) rt.fixed_state_point_size = 1.0f;
@@ -2657,6 +2714,7 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     for (const auto& d : info.constant_buffer_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_CBUF, 6 /* VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER */, 1);
         if (d.index == 1) r->kind = DMSH_VK_KIND_C1, r->reg = 1;
+        else if (code.stage == 5 && d.index == kDmshPushAlias && out.push_moved) r->kind = DMSH_VK_KIND_DRVCB, r->reg = DMSH_PUSH_BANK;
         else if (d.index == 0 || d.index == 2) r->kind = DMSH_VK_KIND_DRVCB, r->reg = (int16_t)d.index;
         else if (d.index >= 3 && d.index < 19) r->reg = (int16_t)(d.index - 3);
         else r->kind = DMSH_VK_KIND_UNKNOWN, out.unknown++;
@@ -2667,32 +2725,38 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
         const uint32_t base = code.stage == 5 ? cs_base : dmsh_ssbo_base(code.stage);
         if (d.cbuf_index == 0 && base && d.cbuf_offset >= base && d.cbuf_offset < base + 16 * 16u && !((d.cbuf_offset - base) % 16u))
             r->reg = (int16_t)((d.cbuf_offset - base) / 16u);
-        else if (d.cbuf_index == 0 && code.stage == 5 && d.cbuf_offset >= 0x210 && d.cbuf_offset < 0x210 + 16 * 16u && !((d.cbuf_offset - 0x210) % 16u))
-            r->kind = DMSH_VK_KIND_UBO_PTR, r->reg = (int16_t)((d.cbuf_offset - 0x210) / 16u);
+        else if (d.cbuf_index == 0 && code.stage == 5 && cs[5] && d.cbuf_offset >= cs[1] && d.cbuf_offset < cs[1] + 16 * cs[5] && !((d.cbuf_offset - cs[1]) % 16u))
+            r->kind = DMSH_VK_KIND_UBO_PTR, r->reg = (int16_t)((d.cbuf_offset - cs[1]) / 16u);
         else if (d.cbuf_index >= 3 && d.cbuf_index < 19) r->kind = DMSH_VK_KIND_SBUF_UBO, r->reg = (int16_t)(d.cbuf_index - 3), r->off = (uint16_t)d.cbuf_offset;
-        else r->flags |= DMSH_VK_BF_NOSLOT, out.unknown++;
+        else {
+            r->flags |= DMSH_VK_BF_NOSLOT, out.unknown++;
+            char line[160];
+            snprintf(line, sizeof line, "noslot sbuf: stage %d cbuf %u offset %#x%s (ssbo table at %#x, %u slots)", code.stage, d.cbuf_index, d.cbuf_offset,
+                     d.is_written ? " written" : "", base, code.stage == 5 ? cs[6] : 16u);
+            out.notes.push_back(line);
+        }
     }
     for (const auto& d : info.texture_buffer_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_TBUF, 4 /* UNIFORM_TEXEL_BUFFER */, 1);
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TBUF, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TBUF, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
         r->dim = 5;
     }
     for (const auto& d : info.image_buffer_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 5 /* STORAGE_TEXEL_BUFFER */, 1);
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
         if (d.is_written) r->flags |= DMSH_VK_BF_RW;
         r->dim = 5 | (d.is_integer ? DMSH_VK_DIM_UINT : 0);
     }
     for (const auto& d : info.texture_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_TEX, 1 /* COMBINED_IMAGE_SAMPLER */, (uint16_t)std::max(1u, d.count));
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, ~0u, DMSH_VK_KIND_TEX, DMSH_VK_KIND_TEX_UBO, &out.unknown);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, ~0u, DMSH_VK_KIND_TEX, DMSH_VK_KIND_TEX_UBO, &out.unknown, cs);
         if (r->kind == DMSH_VK_KIND_TEX) r->skind = DMSH_VK_KIND_SAMP_TEX, r->sreg = r->reg;
         else if (r->kind == DMSH_VK_KIND_TEX_UBO) r->skind = DMSH_VK_KIND_SAMP_UBO, r->sreg = r->reg, r->soff = r->off;
         r->dim = dmsh_dim(d.type, d.is_depth, d.is_multisample, d.is_integer);
     }
     for (const auto& d : info.image_descriptors) {
         dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 3 /* STORAGE_IMAGE */, (uint16_t)std::max(1u, d.count));
-        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown, cs);
         if (d.is_written) r->flags |= DMSH_VK_BF_RW;
         r->dim = dmsh_dim(d.type, false, false, d.is_integer);
     }
@@ -2708,7 +2772,7 @@ bool dmsh_write_library(const char* dir) {
     struct Done { DmshEntryOut out; };
     std::map<uint64_t, Done> entries;
     std::map<std::string, int> failures;
-    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0;
+    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0, push_moved = 0, push_unmoved = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (size_t i = 0; i < seed.stages.size(); i++) {
         const SeedStage& st = seed.stages[i];
@@ -2720,6 +2784,8 @@ bool dmsh_write_library(const char* dir) {
         if (entries.count(out.e.key)) continue;   // (the same shader in two archives)
         written++;
         if (out.unknown) with_unknown++, unknown_binds += out.unknown;
+        if (out.push_moved) push_moved++;
+        if (out.push_unmoved) push_unmoved++;
         entries[out.e.key].out = std::move(out);
         if (tried % 500 == 0) { printf("@@progress %.3f\n", (double)i / seed.stages.size()); fflush(stdout); }
     }
@@ -2773,7 +2839,11 @@ bool dmsh_write_library(const char* dir) {
     if (FILE* r = fopen((vdir + "/eden_report.txt").c_str(), "w")) {
         fprintf(r, "seed stages %zu, tried %zu, written %zu (%zu with a binding the replay cannot fill: %zu such bindings), %.0f s\n", seed.stages.size(), tried, written,
                 with_unknown, unknown_binds, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        fprintf(r, "compute: %zu programs with push-constant reads moved to the push bank, %zu with such reads left in c0\n", push_moved, push_unmoved);
         for (const auto& [why, n] : failures) fprintf(r, "  %6d  %s\n", n, why.c_str());
+        std::map<std::string, int> notes;
+        for (const auto& [key, d] : entries) for (const std::string& n : d.out.notes) notes[n]++;
+        for (const auto& [n, c] : notes) fprintf(r, "  %6d  %s\n", c, n.c_str());
         fclose(r);
     }
     logf("dmsh: %s: %zu entries (%zu with unfillable bindings), %zu not written; blob %llu MB", path.c_str(), written, with_unknown, tried - written,
