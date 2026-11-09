@@ -424,7 +424,14 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
     v = vk_chain(); name = VK_PREFIX + v
     cache = (a.shader_cache or work / 'android-shaders' / 'lib').resolve(); lib = cache / name
     dst = out / 'shaders' / name
-    if not library_current(lib, g):
+    if a.shader_lib:   # a library built elsewhere (the Eden-built one: `hookshot --write-dmsh`, BananzaNative docs/VULKAN_SHARED_PLAN.md): taken as it is, no translator, no .NET
+        lib = (a.shader_lib if a.shader_lib.is_dir() else a.shader_lib.parent).resolve()
+        if not (lib / VK_LIB).is_file(): raise Error(f'--shader-lib: no {VK_LIB} in {lib}')
+        st = lib_stamp(lib)
+        if st.get('game') != g.id: raise Error(f'--shader-lib: {lib / VK_LIB} is a library of game {st.get("game") or "?"}, not {g.id}')
+        if lib.name != name: print(f'shaders: --shader-lib {lib} is named for another chain than this source tree\'s {name}: the pack takes it as {name}')
+        print(f'shaders: taking the library {lib / VK_LIB} as built (inputs {st.get("inputs")})')
+    elif not library_current(lib, g):
         if a.in_process: raise Error(f'no current shader library {lib}: --in-process does not build one yet (vk_android_build.py starts the translator and spirv-val as programs); --no-shaders packs without')
         pkg = (a.shader_pkg or work / 'android-shaders' / 'pkg').resolve()
         if not pkg.is_dir(): split_shaders(a, g, vdir, pkg, parts)   # also into a --shader-pkg folder that is not there yet
@@ -467,6 +474,7 @@ def main():
     ap.add_argument('--shader-python', help='the Python 3.14 (or one with backports.zstd) that runs vk_android_build.py')
     ap.add_argument('-J', type=int, default=8, help='shaders translated at once when the library is built (default 8)')
     ap.add_argument('--no-shaders', action='store_true', help='make the pack without the shader library')
+    ap.add_argument('--shader-lib', type=Path, help='a finished dmsh_vk.lib (or its folder) to pack as the shader library instead of building one: no translator, no .NET (the Eden-built library of `hookshot --write-dmsh`)')
     ap.add_argument('--code-only', action='store_true', help='only rewrite the modules (the phone\'s rewrite step): pack.tsv, game.tsv and the shaders stay as they are')
     ap.add_argument('--keep-code', action='store_true', help='do not rewrite: the pack\'s modules must be there with their key files (the phone\'s pack step)')
     ap.add_argument('--made-by', help='who makes this pack, written as its made_by row (the phone\'s pack step: "app <version>"; the launcher then updates the pack\'s code by itself when only the tools changed)')

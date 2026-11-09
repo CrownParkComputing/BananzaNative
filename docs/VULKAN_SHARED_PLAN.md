@@ -125,4 +125,6 @@ Still open before a phone plays it (in order):
 3. Fragment-depth writes (123 `DepthReplacing` modules) keep the translated convention; the vertex stage's GL-depth constant
    does not reach them.
 4. Geometry and tessellation stages (911): Hookshot's parser does not decode them; the Android replay draws them.
-5. Step 2 of the plan: `scripts/pack_android.py --translator eden` calling this writer, and `bananative_env.py` without .NET.
+5. Step 2 of the plan, done as `android/bananative/scripts/pack_android.py --shader-lib <dmsh_vk.lib>`: the pack takes the Eden-built
+   library as it is (stamp written from its header: game id, inputs `eden-hookshot`), no translator and no .NET run. Tested on
+   Bananza's v4 library (the shader step alone). `bananative_env.py` still installs .NET for the old path until the phone A/B passes.
