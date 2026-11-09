@@ -1,4 +1,4 @@
-# BananzaNative — Donkey Kong Bananza on x86-64 Linux
+# BananzaNative — Donkey Kong Bananza (and Mario Kart World) on x86-64 Linux
 
 A fork of [Hookshot](https://github.com/NotRexed/Hookshot) (NotRexed's static recompilation of Switch 2 games to native
 PC code) that runs **Donkey Kong Bananza** (`040074A01BF12000`, update v458752) natively on x86-64 Linux with Vulkan.
@@ -36,3 +36,11 @@ commits" when upstream moved past `.upstream-sha`. After a merge and a successfu
 --mark` records the new upstream commit.
 
 Licence: GPL-3.0-or-later, as Hookshot.
+
+## Mario Kart World too
+
+The same tree runs Mario Kart World (`0400C3F00006E000`, v917504 — the build Hookshot's runtime was first written for):
+extract its `.nup` to `/mnt/Data/mkw-dump`, lift and build it in a second checkout (the lifted code is per game:
+`OOT_WORK`/`work/dump.txt` pick the dump), prepare its shaders the same way, and start it with `run-mkw.sh`. That script
+sets `RX_VK_CAPTURE_WAIT=0`: the capture write-back wait (an Ocarina of Time exposure fix) waits in MKW for a submission
+held behind the presenting thread, so every wait ran to its 250 ms timeout — 4 fps; off, a race runs at 50-60 fps.
