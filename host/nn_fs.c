@@ -8,6 +8,7 @@
 #include "hos.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -117,6 +118,42 @@ HLE(_ZN2nn2fs8MountRomEPKc) {
     RET(0);
 }
 
+/* (bananza, after BananaNative's hle_fs.c / hle_misc.c) add-on content: one DLC the dump may hold, index 1, its RomFS at
+   HOS_AOC_DIR, else <romfs>/../dlc/romfs (what nx2/nup.py --title <addon id> --extract <dump>/dlc writes) */
+static const char *aoc_root(void) {
+    static char root[MAX_PATH];
+    static int looked;
+    if (!looked) {
+        looked = 1;
+        const char *e = getenv("HOS_AOC_DIR");
+        if (e && *e) snprintf(root, sizeof root, "%s", e);
+        else if (hos_romfs_dir) snprintf(root, sizeof root, "%s/../dlc/romfs", hos_romfs_dir);
+        char probe[MAX_PATH + 32];
+        snprintf(probe, sizeof probe, "%s/.", root);
+        if (!root[0] || access(probe, R_OK)) root[0] = 0;
+        hos_log("fs: add-on content: %s", root[0] ? root : "none (HOS_AOC_DIR, or <romfs>/../dlc/romfs)");
+    }
+    return root[0] ? root : NULL;
+}
+int hos_aoc_count(void) { return aoc_root() ? 1 : 0; }
+/* MountAddOnContent(name, int index, void* cache, size_t) -> Result */
+HLE(_ZN2nn2fs17MountAddOnContentEPKciPvm) {
+    const char *root = aoc_root();
+    if (!root || (int)ARG(1) != 1) { hos_log("fs: MountAddOnContent(%s, %d): no such add-on", gstr(ARG(0)), (int)ARG(1)); RET(R_TARGET_NOT_FOUND); return; }
+    mount(gstr(ARG(0)), root, 0);
+    RET(0);
+}
+HLE(_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi) { if (ARG(0)) G64(ARG(0)) = 0x10000; RET(0); }
+/* IsMounted(name) -> bool: the SDK's own table stays empty, the host's is the one that counts */
+HLE(_ZN2nn2fs9IsMountedEPKc) {
+    const char *name = gstr(ARG(0));
+    int found = 0;
+    AcquireSRWLockShared(&mount_lock);
+    for (int i = 0; i < nmounts && !found; i++) found = !strcmp(mounts[i].name, name);
+    ReleaseSRWLockShared(&mount_lock);
+    RET(found);
+}
+HLE(_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE) { RET(0); }   /* (the save directory is made at mount time) */
 static void user_mount(const char *name, const char *sub) {
     char root[MAX_PATH];
     snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);

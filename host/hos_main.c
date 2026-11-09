@@ -70,6 +70,17 @@ static void no_power_throttling(void) {
 
 int hos_game_is_mkw(void) { return !strcmp(hos_main_build_id, "d00e4f399e411d0613aa8d26b1c02fef"); }
 /* (bananza) Donkey Kong Bananza v458752: its own movie player over nn::codec, not nn::movie's VideoDecoder */
+/* (bananza) the window the game draws (its two leaf functions returning 2880 and 1620, patched by nx2/dkb_patches.py to read
+   these): HOS_WINDOW_SIZE=<w>x<h>, "original" for the game's own; 1920x1080 by default, as BananaNative's phones run it.
+   The render targets scale with it (the upscaler's target is 0.8 of it) */
+uint32_t hos_dkb_window_w = 1920, hos_dkb_window_h = 1080;
+static void dkb_window_size(void) {
+    const char *e = getenv("HOS_WINDOW_SIZE");
+    unsigned w, h;
+    if (e && !strcmp(e, "original")) hos_dkb_window_w = 2880, hos_dkb_window_h = 1620;
+    else if (e && sscanf(e, "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360) hos_dkb_window_w = w, hos_dkb_window_h = h;
+    if (hos_game_is_dkb()) hos_log("window: %ux%u (HOS_WINDOW_SIZE; the game's own 2880x1620)", hos_dkb_window_w, hos_dkb_window_h);
+}
 int hos_game_is_dkb(void) { return !strncmp(hos_main_build_id, "e25c90c1c136638885659fd55bf8a03b", 32); }
 
 /* gen/hos_image.c (build.py lift) */
@@ -1261,6 +1272,7 @@ static int game_main(int argc, char **argv) {
         return 2;
     }
     if (getenv("HOS_TRACE")) hos_trace = 1;
+    dkb_window_size();
     if (!hos_user_dir) hos_user_dir = "user";
     CreateDirectoryA(hos_user_dir, NULL);
     if (!reserve_guest()) {

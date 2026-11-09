@@ -181,6 +181,8 @@ def main():
         import oot_patches
         main_build = next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), "")
         oot_patches.apply(gen, protect_hearts=a.standalone and main_build == oot_patches.LIFE_BUILD_ID)
+        import dkb_patches   # (bananza) Donkey Kong Bananza's window size; a no-op for another game
+        dkb_patches.apply(gen)
         a64_rtgen.write(gen)
         if a.standalone:
             start, exit_ = standalone.write_image_c(gen, img, meta, a.exefs)
