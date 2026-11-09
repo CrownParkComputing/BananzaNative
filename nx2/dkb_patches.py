@@ -24,8 +24,11 @@ def apply(gen):
             pat = re.compile(r"(void %s\(Ctx \*__restrict A64_NOESC c\) \{\n    c->x\[0\] = )%s;" % (fn, re.escape(const)))
             out, n = pat.subn(r"\g<1>(uint64_t)%s;" % var, out)
             done += n
-        if out != s:
-            out = "extern uint32_t hos_dkb_window_w, hos_dkb_window_h;   /* (nx2/dkb_patches.py) */\n" + out
+        if out != s:   # (the declaration after the file's includes, which bring uint32_t)
+            decl = "extern uint32_t hos_dkb_window_w, hos_dkb_window_h;   /* (nx2/dkb_patches.py) */\n"
+            m = None
+            for m in re.finditer(r"^#include[^\n]*\n", out, re.M): pass
+            out = out[:m.end()] + decl + out[m.end():] if m else decl + out
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(out)
     print("dkb_patches: window size functions patched: %d of 2%s" % (done, "" if done == 2 else " (not this game, or another build)"))

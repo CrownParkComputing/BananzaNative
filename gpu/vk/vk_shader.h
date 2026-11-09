@@ -131,3 +131,6 @@ double shader_translate_ms();
 void program_released(const nvn_prog* p);
 
 } // namespace mkwvk
+
+/// (bananza) the Android replay's shader library (dmsh_vk.lib) from Eden over the seed: docs/VULKAN_SHARED_PLAN.md step 1
+namespace mkwvk { bool dmsh_write_library(const char* dir); }

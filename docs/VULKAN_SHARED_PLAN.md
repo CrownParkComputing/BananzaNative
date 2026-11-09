@@ -78,3 +78,29 @@ records is the core of the work, not a new translator.
   matrices, raw SPIR-V with the game's layouts, conditional rendering, timeline semaphores).
 - Running the x86 recompiled C on ARM64: possible in principle (the lifted C is portable) but strictly worse than
   running the game's own ARM64 code natively, which the Android side already does.
+
+## Step 1 — first result (2026-11-09)
+
+`hookshot --write-dmsh <dir>` (the writer at the end of `gpu/vk/vk_shader.cpp`, `dmsh_write_library`) over Bananza's seed
+(22,549 stages), then `tools/dmsh_check` (BananaNative's `vka_shlib.c` reader compiled on Linux, `tools/dmsh_check.sh`)
+with `spirv-val --target-env vulkan1.3 --uniform-buffer-standard-layout`:
+
+| | |
+|---|---|
+| translated and written | **21,496 stages** (8,920 vertex, 12,430 fragment, 146 compute) in 39 s, 884 MB of raw SPIR-V |
+| refused by the file reader | 0 entries, 0 unreadable modules |
+| `spirv-val` failures | **0** (21,001 without the uniform-buffer-standard-layout rule: Eden lays constant buffers out as `u32[]` with stride 4) |
+| bindings | 147,242: cbuf 68,158, tex 70,501, sbuf 3,435, drvcb 2,594, c1 2,121, img 154, **unknown 279 in 129 entries** |
+| not written | 911 stages Hookshot's parser rejects (geometry / tessellation, which it never draws); 0 with cooperative matrices |
+
+What is left before a phone can play it (in order):
+1. The Android device must enable what Eden's modules assume: `uniformBufferStandardLayout` (Vulkan 1.2), 8/16-bit storage and
+   int8/16/64/float16 as the Adreno reports them (`vka_dev.c` asks for bufferDeviceAddress and update-after-bind today).
+2. The 129 entries with an unknown binding: compute-stage texture/image handles (Eden reads them from c0's per-shader
+   layout; the record needs the slot the host binds, as `dmsh_build.py` derives it) and handles Eden resolves at draw time.
+3. Variants and specialization constants the replay expects of a library (`DMSH_VK_SPEC_GL_DEPTH`, the alpha test, UINT
+   colour outputs, dual-source): today the base module only, depth convention left as translated.
+4. Header `subgroup_size` 32: the replay pins fragment/compute to 32 lanes where the device allows and rewrites the vertex
+   pipeline to one-lane subgroups otherwise; 64-lane emission (Eden `max_subgroup_size`) is the alternative.
+5. zstd modules (`DMSH_VK_CODEC_ZSTD`) to bring 884 MB down to ~200.
+6. On the phone: `DM_VK_SHLIB=<this dmsh_vk.lib>` with `DM_VK_SHLIB_CHECK=1`, draws compared with the Ryujinx library.

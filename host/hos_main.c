@@ -1227,6 +1227,15 @@ static int game_main(int argc, char **argv) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) hos_user_dir = argv[++i];
         else if (!strcmp(argv[i], "--trace")) hos_trace = 1;
+        else if (!strcmp(argv[i], "--write-dmsh") && i + 1 < argc) {   /* (bananza) the Android replay's shader library from Eden (docs/VULKAN_SHARED_PLAN.md) */
+            char id[24];
+            snprintf(id, sizeof id, "%016llX", (unsigned long long)hos_program_id);
+            setenv("HOOKSHOT_PREPARE_ONLY", "1", 1);
+            setenv("RX_VK_WRITE_DMSH", argv[++i], 1);
+            setenv("RX_VK_DMSH_GAME", id, 1);
+            int rx_prepare_shaders(void);
+            return rx_prepare_shaders() ? 0 : 3;
+        }
         else if (!strcmp(argv[i], "--prepare-shaders")) {   /* (hookshot) a build's last step: no game */
 #ifdef _WIN32
             _putenv("HOOKSHOT_PREPARE_ONLY=1");

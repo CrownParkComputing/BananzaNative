@@ -11,6 +11,7 @@
 // vk_pipeline.cpp lays out from the stages' Info the same way.
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/file.h>
 #endif
 #include <io.h>
@@ -2444,4 +2445,341 @@ void program_released(const nvn_prog* p) {
     codes.erase(p->serial);
 }
 
+} // namespace mkwvk
+
+// ---- (bananza) The Android replay's shader library from Eden: docs/VULKAN_SHARED_PLAN.md step 1. Every stage of the seed
+// (hookshot_shaders.bin, nx2/shader_census.py) is translated on its own with Eden's recompiler and written as one entry of
+// dmsh_vk.lib, the format moceure's BananaNative replay loads (android/bananative/dm/gfx/nvn/dmsh_abi_vk.h): the SPIR-V as
+// the base module, and one binding record per descriptor saying what the replay binds there, in the order Eden numbers the
+// descriptors (constant buffers, storage buffers, texture buffers, image buffers, textures, images; one binding each) from
+// the stage's range of set 0. The key is BananaNative's (SHA-256 of the control section's first 0x48 bytes with +0x30
+// zeroed, then the code area; its first 8 bytes big-endian). What Eden resolves at draw time (handle programs: a texture
+// whose handle comes from a storage buffer) has no record kind: the entry is written with an unknown binding and the replay
+// refuses that shader, counted in the report. hookshot --write-dmsh <dir>: RX_VK_WRITE_DMSH names the folder. ----
+#include "../../android/bananative/dm/gfx/nvn/dmsh_abi_vk.h"
+#include "../../android/bananative/dm/gfx/nvn/dmsh_chain.h"
+#include "../../android/bananative/dm/gfx/nvn/dmsh_chain_vk.h"
+namespace mkwvk {
+namespace {
+// SHA-256 (FIPS 180-4), for the keys
+struct Sha256 {
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    uint8_t buf[64]{};
+    uint64_t total = 0;
+    size_t n = 0;
+    static uint32_t rotr(uint32_t x, int r) { return (x >> r) | (x << (32 - r)); }
+    void block(const uint8_t* p) {
+        static const uint32_t k[64] = {
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+        for (int i = 16; i < 64; i++) {
+            const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3), s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            const uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25), ch = (e & f) ^ (~e & g), t1 = hh + S1 + ch + k[i] + w[i];
+            const uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22), mj = (a & b) ^ (a & c) ^ (b & c), t2 = S0 + mj;
+            hh = g, g = f, f = e, e = d + t1, d = c, c = b, b = a, a = t1 + t2;
+        }
+        h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e, h[5] += f, h[6] += g, h[7] += hh;
+    }
+    void update(const uint8_t* p, size_t len) {
+        total += len;
+        while (len) {
+            const size_t take = std::min(len, 64 - n);
+            std::memcpy(buf + n, p, take), n += take, p += take, len -= take;
+            if (n == 64) block(buf), n = 0;
+        }
+    }
+    void finish(uint8_t out[32]) {
+        const uint64_t bits = total * 8;
+        uint8_t pad = 0x80;
+        update(&pad, 1);
+        uint8_t z = 0;
+        while (n != 56) update(&z, 1);
+        uint8_t len[8];
+        for (int i = 0; i < 8; i++) len[i] = (uint8_t)(bits >> (56 - 8 * i));
+        update(len, 8);
+        for (int i = 0; i < 8; i++) out[4 * i] = (uint8_t)(h[i] >> 24), out[4 * i + 1] = (uint8_t)(h[i] >> 16), out[4 * i + 2] = (uint8_t)(h[i] >> 8), out[4 * i + 3] = (uint8_t)h[i];
+    }
+};
+constexpr size_t kDmshKeyCtl = 0x48;   // (shader_split.py NVN2_KEY_CTL)
+uint64_t dmsh_key(const uint8_t* ctl, const uint8_t* code, size_t code_len) {
+    uint8_t c[kDmshKeyCtl];
+    std::memcpy(c, ctl, kDmshKeyCtl);
+    std::memset(c + 0x30, 0, 4);
+    Sha256 s;
+    s.update(c, kDmshKeyCtl);
+    s.update(code, code_len);
+    uint8_t md[32];
+    s.finish(md);
+    uint64_t k = 0;
+    for (int i = 0; i < 8; i++) k = k << 8 | md[i];
+    return k;
+}
+// NVN stage id (control +0x56) -> the ABI's stage number and the set-0 range it binds in
+int dmsh_stage(int nvn) {
+    switch (nvn) {
+    case 0: return DMSH_VK_STAGE_VS;
+    case 1: return DMSH_VK_STAGE_FS;
+    case 2: return DMSH_VK_STAGE_GS;
+    case 3: return DMSH_VK_STAGE_TCS;
+    case 4: return DMSH_VK_STAGE_TES;
+    case 5: return DMSH_VK_STAGE_CS;
+    case 6: return DMSH_VK_STAGE_TS;
+    case 7: return DMSH_VK_STAGE_MS;
+    default: return -1;
+    }
+}
+int dmsh_range(int st) { return st == DMSH_VK_STAGE_CS || st == DMSH_VK_STAGE_MS ? DMSH_VK_STAGE_VS : st == DMSH_VK_STAGE_TS ? DMSH_VK_STAGE_TCS : st; }
+uint32_t dmsh_ssbo_base(int nvn) {
+    switch (nvn) {
+    case 0: return 0x110;
+    case 1: return 0x510;
+    case 2: return 0x410;
+    case 6: return 0x670;
+    case 7: return 0x770;
+    default: return 0;
+    }
+}
+uint8_t dmsh_dim(Shader::TextureType t, bool depth, bool ms, bool integer) {
+    uint8_t d = 0;
+    switch (t) {
+    case Shader::TextureType::Color1D: d = 0; break;
+    case Shader::TextureType::ColorArray1D: d = 0 | DMSH_VK_DIM_ARRAY; break;
+    case Shader::TextureType::Color2D: case Shader::TextureType::Color2DRect: d = 1; break;
+    case Shader::TextureType::ColorArray2D: d = 1 | DMSH_VK_DIM_ARRAY; break;
+    case Shader::TextureType::Color3D: d = 2; break;
+    case Shader::TextureType::ColorCube: d = 3; break;
+    case Shader::TextureType::ColorArrayCube: d = 3 | DMSH_VK_DIM_ARRAY; break;
+    case Shader::TextureType::Buffer: d = 5; break;
+    default: d = 1; break;
+    }
+    if (depth) d |= DMSH_VK_DIM_DEPTH;
+    if (ms) d |= DMSH_VK_DIM_MS;
+    if (integer) d |= DMSH_VK_DIM_UINT;   // (Eden says integer, not its sign: the replay's view type follows the texture)
+    return d;
+}
+struct DmshEntryOut {
+    dmsh_vk_entry e{};
+    std::vector<dmsh_vk_bind> binds;
+    std::vector<uint8_t> c1;
+    std::vector<uint32_t> spirv;
+    int unknown = 0;   // bindings the replay cannot fill
+};
+// A texture or image handle's binding: from the c2 table (graphics, slot = (offset - 0x20) / 8), a uniform buffer word
+// (tex_ubo), or nothing this format names (compute's per-shader c0 layout, handle programs): unknown
+void dmsh_handle_bind(dmsh_vk_bind& b, int nvn_stage, uint32_t cbuf_index, uint32_t cbuf_offset, uint32_t handle_program, uint8_t kind, uint8_t ubo_kind,
+                      int* unknown) {
+    b.kind = kind;
+    b.reg = -1;
+    b.off = 0;
+    if (handle_program != ~0u) { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; return; }
+    if (cbuf_index == 2 && nvn_stage != 5 && cbuf_offset >= 0x20 && !((cbuf_offset - 0x20) & 7)) b.reg = (int16_t)((cbuf_offset - 0x20) / 8);
+    else if (cbuf_index >= 3 && cbuf_index < 19) b.kind = ubo_kind, b.reg = (int16_t)(cbuf_index - 3), b.off = (uint16_t)cbuf_offset;
+    else { b.kind = DMSH_VK_KIND_UNKNOWN; ++*unknown; }
+}
+bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& why) {
+    Code code = stage_of_seed(st);
+    if (!code.ok) return why = "control or code not parsed", false;
+    const int ds = dmsh_stage(code.stage);
+    if (ds < 0 || code.stage == 6 || code.stage == 7 || code.stage == 2 || code.stage == 3 || code.stage == 4)
+        return why = "stage not written yet (task, mesh, geometry, tessellation)", false;
+    auto blank = std::make_unique<NvnState>();
+    blank->nvattr = 16;
+    Shader::Stage shst = code.stage == 5 ? Shader::Stage::Compute : code.stage == 1 ? Shader::Stage::Fragment : Shader::Stage::VertexB;
+    Shader::Backend::Bindings bindings{};
+    bindings.unified = (u32)dmsh_range(ds) * DMSH_VK_STAGE_BINDINGS;
+    uint32_t cs_base = 0;
+    struct Reset { ~Reset() { seed_cs_control = nullptr; Shader::Optimization::g_nvn2_compute_ssbo_base = 0, Shader::Optimization::g_nvn2_compute_ssbo_count = 16; Shader::Optimization::g_nvn2_compute_layout_end = 0; } } reset;
+    if (code.stage == 5) {
+        seed_cs_control = seed.blob.data() + st.control;
+        uint32_t count = 0, end = 0;
+        cs_base = compute_ssbo_table(*blank, &count, &end);
+        Shader::Optimization::g_nvn2_compute_ssbo_base = count ? cs_base : 0;
+        Shader::Optimization::g_nvn2_compute_ssbo_count = count ? count : 16;
+        Shader::Optimization::g_nvn2_compute_layout_end = count ? end : 0;
+        if (!count) cs_base = 0x310;
+    }
+    Env env{*blank, code, shst};
+    std::unique_ptr<Translation> t;
+    std::vector<uint32_t> spirv;
+    try {
+        t = translate(env, code.stage != 5);
+        if (t->program.info.uses_cooperative_matrix) return why = "cooperative matrices (no lowering for the phone yet)", false;
+        Shader::RuntimeInfo rt{};
+        if (code.stage == 0) {
+            if (!t->program.info.stores[Shader::IR::Attribute::PointSize]) rt.fixed_state_point_size = 1.0f;
+            for (auto& g : rt.generic_input_types) g = Shader::AttributeType::Float;
+            rt.previous_stage_stores.mask.set();
+            rt.convert_depth_mode = false;   // (the library's DMSH_VK_SPEC_GL_DEPTH constant does this on the phone: not written yet)
+        } else if (code.stage == 1) {
+            rt.previous_stage_stores.mask.set();
+            for (auto& c : rt.color_output_types) c = Shader::AttributeType::Float;
+        }
+        spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, t->program, bindings);
+    } catch (const std::exception& e) {
+        return why = e.what(), false;
+    }
+    const Shader::Info& info = t->program.info;
+    dmsh_vk_entry& e = out.e;
+    std::memset(&e, 0, sizeof e);
+    e.key = dmsh_key(seed.blob.data() + st.control, seed.blob.data() + st.code, st.end);
+    e.stage = (uint8_t)ds;
+    e.mod_count = 1;
+    if (info.uses_subgroup_invocation_id || info.uses_subgroup_shuffles || info.uses_quad_shuffles) e.flags |= DMSH_VK_F_SUBGROUP;
+    if (info.uses_fp64) e.flags |= 0;   // (the device's shaderFloat64 decides; nothing lowered here)
+    for (int i = 0; i < 3; i++) e.local[i] = (uint16_t)std::max(1u, t->program.workgroup_size[i]);
+    e.shared = t->program.shared_memory_size;
+    if (code.stage == 0)
+        for (u32 i = 0; i < 32; i++)
+            if (info.loads.Generic(i)) e.vin_mask |= 1u << i;
+    if (code.stage == 1)
+        for (int i = 0; i < 8; i++)
+            if (info.stores_frag_color[i]) e.fout_mask |= 1u << i;
+    out.c1 = code.c1;
+    out.spirv = std::move(spirv);
+    // the binding records, in Eden's numbering
+    uint32_t b = (uint32_t)dmsh_range(ds) * DMSH_VK_STAGE_BINDINGS;
+    auto rec = [&](uint8_t kind, uint8_t desc, uint16_t count) {
+        dmsh_vk_bind r{};
+        r.kind = kind, r.desc = desc, r.binding = (uint16_t)b++, r.set = DMSH_VK_SET_DRAW, r.count = count, r.reg = -1, r.soff = 0xFFFF;
+        out.binds.push_back(r);
+        return &out.binds.back();
+    };
+    for (const auto& d : info.constant_buffer_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_CBUF, 6 /* VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER */, 1);
+        if (d.index == 1) r->kind = DMSH_VK_KIND_C1, r->reg = 1;
+        else if (d.index == 0 || d.index == 2) r->kind = DMSH_VK_KIND_DRVCB, r->reg = (int16_t)d.index;
+        else if (d.index >= 3 && d.index < 19) r->reg = (int16_t)(d.index - 3);
+        else r->kind = DMSH_VK_KIND_UNKNOWN, out.unknown++;
+    }
+    for (const auto& d : info.storage_buffers_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_SBUF, 7 /* STORAGE_BUFFER */, 1);
+        if (d.is_written) r->flags |= DMSH_VK_BF_RW;
+        const uint32_t base = code.stage == 5 ? cs_base : dmsh_ssbo_base(code.stage);
+        if (d.cbuf_index == 0 && base && d.cbuf_offset >= base && d.cbuf_offset < base + 16 * 16u && !((d.cbuf_offset - base) % 16u))
+            r->reg = (int16_t)((d.cbuf_offset - base) / 16u);
+        else if (d.cbuf_index == 0 && code.stage == 5 && d.cbuf_offset >= 0x210 && d.cbuf_offset < 0x210 + 16 * 16u && !((d.cbuf_offset - 0x210) % 16u))
+            r->kind = DMSH_VK_KIND_UBO_PTR, r->reg = (int16_t)((d.cbuf_offset - 0x210) / 16u);
+        else if (d.cbuf_index >= 3 && d.cbuf_index < 19) r->kind = DMSH_VK_KIND_SBUF_UBO, r->reg = (int16_t)(d.cbuf_index - 3), r->off = (uint16_t)d.cbuf_offset;
+        else r->flags |= DMSH_VK_BF_NOSLOT, out.unknown++;
+    }
+    for (const auto& d : info.texture_buffer_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_TBUF, 4 /* UNIFORM_TEXEL_BUFFER */, 1);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_TBUF, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        r->dim = 5;
+    }
+    for (const auto& d : info.image_buffer_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 5 /* STORAGE_TEXEL_BUFFER */, 1);
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        if (d.is_written) r->flags |= DMSH_VK_BF_RW;
+        r->dim = 5 | (d.is_integer ? DMSH_VK_DIM_UINT : 0);
+    }
+    for (const auto& d : info.texture_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_TEX, 1 /* COMBINED_IMAGE_SAMPLER */, (uint16_t)std::max(1u, d.count));
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, ~0u, DMSH_VK_KIND_TEX, DMSH_VK_KIND_TEX_UBO, &out.unknown);
+        if (r->kind == DMSH_VK_KIND_TEX) r->skind = DMSH_VK_KIND_SAMP_TEX, r->sreg = r->reg;
+        else if (r->kind == DMSH_VK_KIND_TEX_UBO) r->skind = DMSH_VK_KIND_SAMP_UBO, r->sreg = r->reg, r->soff = r->off;
+        r->dim = dmsh_dim(d.type, d.is_depth, d.is_multisample, d.is_integer);
+    }
+    for (const auto& d : info.image_descriptors) {
+        dmsh_vk_bind* r = rec(DMSH_VK_KIND_IMG, 3 /* STORAGE_IMAGE */, (uint16_t)std::max(1u, d.count));
+        dmsh_handle_bind(*r, code.stage, d.cbuf_index, d.cbuf_offset, d.handle_program, DMSH_VK_KIND_IMG, DMSH_VK_KIND_UNKNOWN, &out.unknown);
+        if (d.is_written) r->flags |= DMSH_VK_BF_RW;
+        r->dim = dmsh_dim(d.type, false, false, d.is_integer);
+    }
+    e.bind_count = (uint16_t)out.binds.size();
+    e.c1_len = (uint32_t)out.c1.size();
+    return true;
+}
+} // namespace
+
+bool dmsh_write_library(const char* dir) {
+    const size_t programs = seed_open();
+    if (!programs) { logf("dmsh: no seed (hookshot_shaders.bin beside the game): nothing to write"); return false; }
+    struct Done { DmshEntryOut out; };
+    std::map<uint64_t, Done> entries;
+    std::map<std::string, int> failures;
+    size_t tried = 0, written = 0, with_unknown = 0, unknown_binds = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < seed.stages.size(); i++) {
+        const SeedStage& st = seed.stages[i];
+        if (!st.end) continue;
+        tried++;
+        DmshEntryOut out;
+        std::string why;
+        if (!dmsh_translate_stage(st, out, why)) { failures[why.substr(0, 60)]++; continue; }
+        if (entries.count(out.e.key)) continue;   // (the same shader in two archives)
+        written++;
+        if (out.unknown) with_unknown++, unknown_binds += out.unknown;
+        entries[out.e.key].out = std::move(out);
+        if (tried % 500 == 0) { printf("@@progress %.3f\n", (double)i / seed.stages.size()); fflush(stdout); }
+    }
+    // the file: header, entries by key, binding records, module records, blob (c1 bytes and SPIR-V words, 16-byte aligned)
+    std::vector<dmsh_vk_entry> ents;
+    std::vector<dmsh_vk_bind> binds;
+    std::vector<dmsh_vk_module> mods;
+    std::vector<uint8_t> blob;
+    auto put = [&](const void* p, size_t n) {
+        while (blob.size() % 16) blob.push_back(0);
+        const uint64_t off = blob.size();
+        blob.insert(blob.end(), (const uint8_t*)p, (const uint8_t*)p + n);
+        return off;
+    };
+    for (auto& [key, d] : entries) {
+        dmsh_vk_entry e = d.out.e;
+        if (!d.out.c1.empty()) { const uint64_t o = put(d.out.c1.data(), d.out.c1.size()); e.c1_off = (uint32_t)o, e.c1_off_hi = (uint32_t)(o >> 32); }
+        e.bind = (uint32_t)binds.size();
+        binds.insert(binds.end(), d.out.binds.begin(), d.out.binds.end());
+        e.mod = (uint32_t)mods.size();
+        dmsh_vk_module m{};
+        const uint64_t o = put(d.out.spirv.data(), d.out.spirv.size() * 4);
+        m.off = (uint32_t)o, m.off_hi = (uint16_t)(o >> 32), m.size = m.stored = (uint32_t)(d.out.spirv.size() * 4), m.variant = DMSH_VK_MOD_BASE, m.codec = DMSH_VK_CODEC_RAW;
+        mods.push_back(m);
+        ents.push_back(e);
+    }
+    dmsh_vk_header h{};
+    h.magic = DMSH_VK_LIB_MAGIC, h.version = DMSH_VK_LIB_VERSION;
+    auto pad16 = [](char* dst, const char* s) { std::memset(dst, 0, 16); std::memcpy(dst, s, std::min<size_t>(16, strlen(s))); };
+    pad16(h.chain, DMSH_CHAIN), pad16(h.vk_chain, DMSH_VK_CHAIN), pad16(h.inputs, "eden-hookshot");
+    pad16(h.game, getenv("RX_VK_DMSH_GAME") ? getenv("RX_VK_DMSH_GAME") : "0000000000000000");   // (the title id, from hos_main.c)
+    std::memcpy(h.abi, DMSH_VK_ABI, std::min<size_t>(12, strlen(DMSH_VK_ABI)));
+    h.entry_count = (uint32_t)ents.size(), h.entry_off = DMSH_VK_HEADER_SIZE;
+    h.bind_count = (uint32_t)binds.size(), h.bind_off = h.entry_off + h.entry_count * DMSH_VK_ENTRY_SIZE;
+    h.mod_count = (uint32_t)mods.size(), h.mod_off = h.bind_off + h.bind_count * DMSH_VK_BIND_SIZE;
+    h.blob_off = (h.mod_off + h.mod_count * DMSH_VK_MOD_SIZE + 15) / 16 * 16, h.blob_size = blob.size();
+    h.subgroup_size = 32;   // (Eden's modules are written for 32 lanes: the replay pins the stage to 32 where it can)
+    h.ssbo_align = 0;       // (storage buffers at their exact address)
+    std::string vdir = std::string(dir) + "/" DMSH_VK_DIR_PREFIX DMSH_VK_CHAIN;
+    mkdir(dir, 0755), mkdir(vdir.c_str(), 0755);
+    const std::string path = vdir + "/" DMSH_VK_LIB_FILE;
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { logf("dmsh: cannot write %s", path.c_str()); return false; }
+    fwrite(&h, 1, sizeof h, f);
+    fwrite(ents.data(), sizeof(dmsh_vk_entry), ents.size(), f);
+    fwrite(binds.data(), sizeof(dmsh_vk_bind), binds.size(), f);
+    fwrite(mods.data(), sizeof(dmsh_vk_module), mods.size(), f);
+    for (uint64_t at = h.mod_off + h.mod_count * DMSH_VK_MOD_SIZE; at < h.blob_off; at++) fputc(0, f);
+    fwrite(blob.data(), 1, blob.size(), f);
+    fclose(f);
+    if (FILE* r = fopen((vdir + "/eden_report.txt").c_str(), "w")) {
+        fprintf(r, "seed stages %zu, tried %zu, written %zu (%zu with a binding the replay cannot fill: %zu such bindings), %.0f s\n", seed.stages.size(), tried, written,
+                with_unknown, unknown_binds, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        for (const auto& [why, n] : failures) fprintf(r, "  %6d  %s\n", n, why.c_str());
+        fclose(r);
+    }
+    logf("dmsh: %s: %zu entries (%zu with unfillable bindings), %zu not written; blob %llu MB", path.c_str(), written, with_unknown, tried - written,
+         (unsigned long long)(blob.size() >> 20));
+    printf("@@done dmsh %zu entries\n", written);
+    fflush(stdout);
+    return true;
+}
 } // namespace mkwvk

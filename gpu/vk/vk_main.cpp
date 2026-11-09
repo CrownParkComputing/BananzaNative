@@ -15,6 +15,7 @@
 #include "vk_api.h"
 #include "vk_draw.h"
 #include "vk_internal.h"
+#include "vk_shader.h"
 #include "gpu_choice.h"
 #include "vk_menu.h"
 
@@ -521,6 +522,11 @@ std::string skipped_path() {
 bool started_up() {
     if (const char* e = getenv("RX_VK_START_DELAY")) Sleep((DWORD)atoi(e) * 1000);   // (diagnosis: a long start, as the first one is)
     if (!replay_start()) return false;
+    if (prepare_only() && getenv("RX_VK_WRITE_DMSH")) {   // (bananza: hookshot --write-dmsh <dir>, the Android replay's library from Eden)
+        printf("@@stage dmsh Writing the Android shader library\n");
+        fflush(stdout);
+        return dmsh_write_library(getenv("RX_VK_WRITE_DMSH"));
+    }
     if (prepare_only()) {
         // (three parts: the programs, the pipelines the notes predict, then those they name; most of the time is the first)
         static int part;
