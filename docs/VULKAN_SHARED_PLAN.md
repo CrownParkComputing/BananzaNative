@@ -116,6 +116,11 @@ PhysicalStorageBufferAddresses 48, DemoteToHelperInvocation 5,770, DepthReplacin
 physical device reports (Vulkan 1.1–1.3 feature structs passed back as queried), so the open question is only whether the
 Adreno reports them — float-controls properties and `uniformBufferStandardLayout` in particular.
 
+**Mario Kart World** (same writer, `~/MKW-recomp` rebuilt on this tree): 11,326 of 11,422 seed stages written (3,452 vertex, 7,197 fragment,
+677 compute; 67 unparsed, 26 task/mesh/geometry/tessellation), 118 MB, 0 unfillable bindings, 0 spirv-val failures after one fix (a
+storage image with an integer format from its atomic but a float sampled type from the blank state: the writer now makes every formatted
+image integer). 96 compute programs use the pool table. Library at `/mnt/Data/mkw-eden-lib/v-0035e16073bf/dmsh_vk.lib`.
+
 Still open before a phone plays it (in order):
 1. On the phone: `DM_VK_SHLIB=<this dmsh_vk.lib>` with `DM_VK_SHLIB_CHECK=1`, draws compared with the Ryujinx library. No
    phone is attached to this machine; the library is at `/mnt/Data/bananza-eden-lib/v4/v-0035e16073bf/dmsh_vk.lib`.

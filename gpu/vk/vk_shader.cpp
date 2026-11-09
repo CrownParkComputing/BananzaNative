@@ -2670,6 +2670,10 @@ bool dmsh_translate_stage(const SeedStage& st, DmshEntryOut& out, std::string& w
     try {
         t = translate(env, code.stage != 5);
         if (t->program.info.uses_cooperative_matrix) return why = "cooperative matrices (no lowering for the phone yet)", false;
+        // (a storage image with an integer format from its instruction (atomics: R32ui) but a float sampled type from the blank state's
+        // answer is invalid SPIR-V (MKW ab77eaee44cfef88); every named ImageFormat is an integer one, and the emitter follows is_integer)
+        for (auto& d : t->program.info.image_descriptors) if (d.format != Shader::ImageFormat::Typeless) d.is_integer = true;
+        for (auto& d : t->program.info.image_buffer_descriptors) if (d.format != Shader::ImageFormat::Typeless) d.is_integer = true;
         if (code.stage == 5) {
             const int moved = dmsh_move_push_reads(t->program, cs[0]);
             if (moved < 0) out.push_unmoved = true;
